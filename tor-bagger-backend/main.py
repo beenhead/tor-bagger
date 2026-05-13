@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import math
 import gpxpy
 import bcrypt
@@ -13,9 +15,19 @@ from datetime import datetime, timedelta
 import models
 from database import engine, get_db
 
+
+
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Tor Bagger API", description="MySQL & JWT Powered Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, this would be your actual website URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Load variables from the .env file
 load_dotenv()
@@ -85,6 +97,30 @@ class BagRequest(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    is_admin: bool
+
+class TorSuggestionCreate(BaseModel):
+    suggested_name: str = Field(..., max_length=100)
+    suggested_lat: float
+    suggested_lon: float
+    suggested_elevation: int
+    suggested_description: str | None = None
+    tor_id: int | None = None  # None for a NEW tor, ID for an EDIT
+
+@app.post("/tors/suggest")
+def suggest_tor(suggestion: TorSuggestionCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    new_suggestion = models.TorSuggestion(
+        user_id=current_user.id,
+        tor_id=suggestion.tor_id,
+        suggested_name=suggestion.suggested_name,
+        suggested_lat=suggestion.suggested_lat,
+        suggested_lon=suggestion.suggested_lon,
+        suggested_elevation=suggestion.suggested_elevation,
+        status="pending"
+    )
+    db.add(new_suggestion)
+    db.commit()
+    return {"message": "Suggestion submitted for review!"}
 
 def calculate_distance_meters(lat1, lon1, lat2, lon2):
     R = 6371000 
@@ -128,12 +164,35 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(data={"sub": user.username}, expires_delta=access_token_expires)
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "is_admin": user.is_admin 
+    }
 
 @app.get("/tors")
 def get_all_tors(db: Session = Depends(get_db)):
-    tors = db.query(models.Tor).all()
-    return {"tors": tors}
+    # This query fetches all Tors and calculates their average rating from the reviews table
+    tors = db.query(
+        models.Tor,
+        func.avg(models.TorReview.rating).label('avg_rating'),
+        func.count(models.TorReview.id).label('review_count')
+    ).outerjoin(models.TorReview).group_by(models.Tor.id).all()
+
+    results = []
+    for tor, avg_rating, review_count in tors:
+        tor_data = {
+            "id": tor.id,
+            "name": tor.name,
+            "lat": tor.lat,
+            "lon": tor.lon,
+            "elevation_m": tor.elevation_m,
+            "avg_rating": round(avg_rating, 1) if avg_rating else 0,
+            "review_count": review_count
+        }
+        results.append(tor_data)
+    
+    return {"tors": results}
 
 # NOTICE: We added current_user: models.User = Depends(get_current_user) to lock this down!
 @app.post("/tors/{tor_id}/bag")
@@ -207,4 +266,123 @@ async def upload_gpx(file: UploadFile = File(...), current_user: models.User = D
         "total_bagged_count": len(bagged_this_trip),
         "near_misses": near_misses,
         "total_near_miss_count": len(near_misses)
+    }
+
+@app.get("/my-bagged-tors")
+def get_my_bagged_tors(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Returns a list of Tor IDs that the logged-in user has bagged."""
+    logs = db.query(models.Logbook).filter_by(user_id=current_user.id).all()
+            
+    # We include the name so the frontend doesn't have to look it up
+    stats_data = []
+    for log in logs:
+        stats_data.append({
+            "tor_name": log.tor.name,
+            "bagged_at": log.bagged_at.isoformat() if log.bagged_at else None
+        })
+        
+    return {
+        "count": len(logs),
+        "logs": stats_data
+    }
+
+
+@app.get("/leaderboard")
+def get_leaderboard(db: Session = Depends(get_db)):
+    """Calculates the top 10 users with the most bagged Tors."""
+    leaderboard = db.query(
+        models.User.username,
+        func.count(models.Logbook.id).label('total_bagged')
+    ).join(models.Logbook).group_by(models.User.id).order_by(func.count(models.Logbook.id).desc()).limit(10).all()
+
+    # Format the response into a nice list of dictionaries
+    return [{"rank": i + 1, "username": row[0], "total_bagged": row[1]} for i, row in enumerate(leaderboard)]
+
+class ReviewCreate(BaseModel):
+    rating: int = Field(..., ge=1, le=5) # Ensure 1-5 stars
+    comment: str = Field(..., max_length=500)
+
+@app.post("/tors/{tor_id}/reviews")
+def add_review(tor_id: int, review: ReviewCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Optional: Check if they have actually bagged the tor before letting them review it!
+    has_bagged = db.query(models.Logbook).filter_by(user_id=current_user.id, tor_id=tor_id).first()
+    if not has_bagged:
+        raise HTTPException(status_code=403, detail="You must bag this Tor before you can review it!")
+
+    new_review = models.TorReview(
+        tor_id=tor_id,
+        user_id=current_user.id,
+        rating=review.rating,
+        comment=review.comment
+    )
+    db.add(new_review)
+    db.commit()
+    return {"message": "Review added!"}
+
+@app.get("/tors/{tor_id}/reviews")
+def get_reviews(tor_id: int, db: Session = Depends(get_db)):
+    return db.query(models.TorReview).filter_by(tor_id=tor_id).all()
+
+@app.get("/admin/suggestions")
+def get_suggestions(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return db.query(models.TorSuggestion).filter_by(status="pending").all()
+
+@app.post("/admin/suggestions/{suggestion_id}/approve")
+def approve_suggestion(suggestion_id: int, current_user: models.User = Depends(get_db)):
+    # Logic: 
+    # 1. Get suggestion
+    # 2. If tor_id exists, update that Tor
+    # 3. If tor_id is null, create a new Tor
+    # 4. Set suggestion status to 'approved'
+    pass # Implementation details below
+
+@app.post("/admin/approve/{s_id}")
+def approve_tor(s_id: int, updated_data: TorSuggestionCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    suggestion = db.query(models.TorSuggestion).filter_by(id=s_id).first()
+    if not suggestion:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+    
+    if updated_data.tor_id:
+        # It's an EDIT: Update the master Tor table with your final tweaked lat/lon
+        master_tor = db.query(models.Tor).filter_by(id=updated_data.tor_id).first()
+        master_tor.name = updated_data.suggested_name
+        master_tor.lat = updated_data.suggested_lat
+        master_tor.lon = updated_data.suggested_lon
+        master_tor.elevation_m = updated_data.suggested_elevation
+        master_tor.description = updated_data.suggested_description
+    else:
+        # It's a NEW Tor: Insert it
+        new_tor = models.Tor(
+            name=updated_data.suggested_name,
+            lat=updated_data.suggested_lat,
+            lon=updated_data.suggested_lon,
+            elevation_m=updated_data.suggested_elevation,
+            description=updated_data.suggested_description
+        )
+        db.add(new_tor)
+
+    suggestion.status = "approved"
+    db.commit()
+    return {"message": "Master database updated!"}
+
+@app.get("/my-stats")
+def get_stats(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    logs = db.query(models.Logbook).filter_by(user_id=current_user.id).all()
+    
+    # We include the name so the frontend doesn't have to look it up
+    stats_data = []
+    for log in logs:
+        stats_data.append({
+            "tor_name": log.tor.name,
+            "visited_at": log.visited_at
+        })
+        
+    return {
+        "count": len(logs),
+        "logs": stats_data
     }
