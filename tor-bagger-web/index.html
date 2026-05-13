@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tor Bagger - Explorer Portal</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; height: 100vh; overflow: hidden; background: #f4f4f9;}
+        #map-container { flex: 1; height: 100%; position: relative; }
+        #map { height: 100%; width: 100%; }
+        
+        #sidebar { width: 380px; background: white; padding: 20px; box-shadow: -2px 0 10px rgba(0,0,0,0.1); z-index: 1000; display: flex; flex-direction: column; overflow-y: auto;}
+        h1 { margin-top: 0; color: #2c3e50; font-size: 1.5rem; border-bottom: 2px solid #27ae60; padding-bottom: 10px;}
+        
+        .nav-tabs { display: flex; margin-bottom: 20px; border-radius: 6px; overflow: hidden; border: 1px solid #27ae60; flex-wrap: wrap;}
+        .nav-btn { flex: 1; min-width: 80px; padding: 10px; text-align: center; background: white; color: #27ae60; cursor: pointer; border: none; font-weight: bold; font-size: 0.8rem;}
+        .nav-btn.active { background: #27ae60; color: white; }
+        
+        .panel { background: #f8f9fa; border: 1px solid #dee2e6; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .hidden { display: none !important; }
+        
+        input, select, textarea { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { width: 100%; padding: 10px; background: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 10px;}
+        button:hover { background: #219653; }
+        .btn-admin { background: #3498db; }
+        .btn-logout { background: #e74c3c; margin-top: 20px; }
+
+        /* Status Box */
+        #status-box { font-size: 0.9rem; margin-top: 10px; padding: 10px; border-radius: 4px; cursor: pointer;}
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+
+        /* Dashboard & Table Styles */
+        .stat-box { background: white; padding: 15px; border-radius: 6px; text-align: center; border: 1px solid #ddd; }
+        .progress-bar-bg { background: #e9ecef; height: 12px; border-radius: 10px; overflow: hidden; margin-top: 10px;}
+        .progress-bar-fill { background: #27ae60; height: 100%; width: 0%; transition: width 0.5s ease;}
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
+
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+            margin-left: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div id="map-container">
+        <div id="map"></div>
+    </div>
+
+    <div id="sidebar">
+        <h1>⛰️ Tor Bagger</h1>
+        <button id="main-logout-btn" class="btn-logout hidden" onclick="handleLogout()">Logout</button>
+        <div id="nav-menu" class="nav-tabs hidden">
+            <button class="nav-btn active" onclick="switchTab('map-panel')">Map</button>
+            <button class="nav-btn" onclick="switchTab('dashboard-panel')">Stats</button>
+            <button class="nav-btn" onclick="switchTab('leaderboard-panel')">Leaders</button>
+            <button id="admin-nav-btn" class="nav-btn hidden" onclick="switchTab('admin-panel')" style="color: #3498db; border-left: 1px solid #3498db;">Admin</button>
+        </div>
+
+        <div id="login-panel" class="panel">
+            <h3>Login</h3>
+            <input type="text" id="username" placeholder="Username">
+            <input type="password" id="password" placeholder="Password">
+            <button onclick="handleLogin()">Sign In</button>
+        </div>
+
+        <div id="map-panel" class="panel hidden tab-content">
+            <h3>GPS Upload</h3>
+            <input type="file" id="gpx-file" accept=".gpx">
+            <button onclick="uploadGPX()">Analyze Hike</button>
+            <div id="gpx-spinner" class="loader hidden"></div>
+            <button class="btn-admin" onclick="openNewTorForm()">➕ Add Missing Tor</button>
+        </div>
+
+        <div id="dashboard-panel" class="panel hidden tab-content">
+            <h3>Your Progress</h3>
+            <div class="stat-box">
+                <div id="dash-bagged-count" style="font-size: 2rem; font-weight: bold; color: #27ae60;">0</div>
+                <div id="dash-total-tors" style="font-size: 0.8rem; color: #666;">Tors Bagged</div>
+                <div class="progress-bar-bg"><div class="progress-bar-fill" id="dash-progress-fill"></div></div>
+            </div>
+            <hr>
+            <div style="text-align: left; margin-top: 15px;">
+                <h4 style="margin-bottom: 10px; color: #333;">Conquered Peaks</h4>
+                <ul id="bagged-tors-list" style="list-style: none; padding: 0; max-height: 200px; overflow-y: auto; font-size: 0.9rem;">
+                    <!-- Tors will be injected here -->
+                </ul>
+            </div>
+            <button class="btn-logout" onclick="handleLogout()">Logout</button>
+        </div>
+
+        <div id="leaderboard-panel" class="panel hidden tab-content">
+            <h3>Leaderboard</h3>
+            <table>
+                <thead><tr><th>#</th><th>User</th><th>Bagged</th></tr></thead>
+                <tbody id="leaderboard-body"></tbody>
+            </table>
+        </div>
+
+        <div id="admin-panel" class="panel hidden tab-content">
+            <h3 style="color: #3498db;">Approval Queue</h3>
+            <div id="suggestion-list">No pending suggestions.</div>
+        </div>
+
+        <div id="status-box" class="hidden"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map('map').setView([50.5719, -3.9811], 11);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+        let currentRouteLine = null; 
+        let markers = L.layerGroup().addTo(map);
+        let statusTimeout;
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(tabId).classList.remove('hidden');
+            event.target.classList.add('active');
+            if(tabId === 'leaderboard-panel') loadLeaderboard();
+            if(tabId === 'admin-panel') loadSuggestions();
+        }
+
+        function showStatus(message, isError = false) {
+            const box = document.getElementById('status-box');
+            box.classList.remove('hidden');
+            box.innerText = message + "\n(Click to dismiss)";
+            box.className = isError ? 'error' : 'success';
+            box.onclick = () => box.classList.add('hidden');
+            if (statusTimeout) clearTimeout(statusTimeout);
+            statusTimeout = setTimeout(() => box.classList.add('hidden'), 15000);
+        }
+
+        async function handleLogin() {
+            const formData = new URLSearchParams();
+            formData.append('username', document.getElementById('username').value);
+            formData.append('password', document.getElementById('password').value);
+            try {
+                const res = await fetch('http://127.0.0.1:8000/token', { method: 'POST', body: formData });
+                if (res.ok) {
+                    const data = await res.json();
+                    localStorage.setItem('tor_token', data.access_token);
+                    localStorage.setItem('is_admin', data.is_admin);
+                    checkAuth();
+                } else { showStatus("Login Failed", true); }
+            } catch (e) { showStatus("Connection Error", true); }
+        }
+
+        function handleLogout() {
+            localStorage.clear();
+            location.reload();
+        }
+
+        function checkAuth() {
+            const token = localStorage.getItem('tor_token');
+            const isAdmin = localStorage.getItem('is_admin') === 'true';
+            const logoutBtn = document.getElementById('main-logout-btn');
+
+            if (token) {
+                document.getElementById('login-panel').classList.add('hidden');
+                document.getElementById('nav-menu').classList.remove('hidden');
+                document.getElementById('map-panel').classList.remove('hidden');
+                
+                // Show the logout button
+                if (logoutBtn) logoutBtn.classList.remove('hidden');
+                
+                if (isAdmin) document.getElementById('admin-nav-btn').classList.remove('hidden');
+            } else {
+                // Hide it if logged out
+                if (logoutBtn) logoutBtn.classList.add('hidden');
+            }
+            loadMapData();
+        }
+
+        async function loadMapData() {
+            markers.clearLayers();
+            const torsRes = await fetch('http://127.0.0.1:8000/tors');
+            const torsData = await torsRes.json();
+            let baggedIds = [];
+            if (localStorage.getItem('tor_token')) {
+                const res = await fetch('http://127.0.0.1:8000/my-bagged-tors', {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+                });
+                if (res.ok) {
+                    const d = await res.json();
+                    baggedIds = d.bagged_tor_ids;
+                    updateDashboard(baggedIds.length, torsData.tors.length);
+                }
+            }
+            torsData.tors.forEach(tor => {
+                const isBagged = baggedIds.includes(tor.id);
+                const marker = L.circleMarker([tor.lat, tor.lon], {
+                    radius: isBagged ? 9 : 7, fillColor: isBagged ? "#27ae60" : "#7f8c8d",
+                    color: "#fff", weight: 2, fillOpacity: 0.9
+                });
+                
+                const stars = tor.avg_rating > 0 ? "⭐".repeat(Math.round(tor.avg_rating)) : "No ratings";
+                const description = tor.description ? `<p style="font-size: 0.8rem; color: #444;">${tor.description}</p>` : "<i>No description available.</i>";
+                let popup = `
+                    <div style="min-width:220px; max-width: 300px;">
+                        <b style="font-size: 1.1rem;">${tor.name}</b><br>
+                        <span style="color: #666;">${tor.elevation_m}m | ${stars}</span>
+                        <hr>
+                        
+                        <div style="font-size: 0.85rem; color: #444; margin-bottom: 10px; line-height: 1.4;">
+                            ${tor.description ? tor.description : "<i>No description available yet.</i>"}
+                        </div>
+                        
+                        <hr>
+                        
+                        <div id="revs-${tor.id}" style="font-size:0.8rem; max-height:80px; overflow-y:auto; background: #fdfdfd; padding: 5px;">
+                            Loading reviews...
+                        </div>
+                `;
+
+
+                if(isBagged) {
+                    popup += `<hr><textarea id="c-${tor.id}" placeholder="Review..." style="height:30px"></textarea><button onclick="submitReview(${tor.id})" style="padding:4px; font-size:0.7rem">Rate 5⭐</button>`;
+                }
+                popup += `<br><a href="#" onclick="openEditForm(${tor.id}, '${tor.name}', ${tor.lat}, ${tor.lon}, ${tor.elevation_m})" style="font-size:0.7rem; color:#3498db">Suggest Correction</a></div>`;
+                
+                marker.bindPopup(popup).on('popupopen', () => fetchReviews(tor.id));
+                markers.addLayer(marker);
+            });
+        }
+
+        function updateDashboard(b, t) {
+            document.getElementById('dash-bagged-count').innerText = b;
+            document.getElementById('dash-progress-fill').style.width = `${(b/t)*100}%`;
+        }
+
+        async function fetchReviews(id) {
+            const res = await fetch(`http://127.0.0.1:8000/tors/${id}/reviews`);
+            const revs = await res.json();
+            document.getElementById(`revs-${id}`).innerHTML = revs.length ? revs.map(r => `<div>${"⭐".repeat(r.rating)}: ${r.comment}</div>`).join('') : "No reviews.";
+        }
+
+        async function submitReview(id) {
+            await fetch(`http://127.0.0.1:8000/tors/${id}/reviews`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rating: 5, comment: document.getElementById(`c-${id}`).value })
+            });
+            map.closePopup();
+            loadMapData();
+        }
+
+        async function uploadGPX() {
+            const fileInput = document.getElementById('gpx-file');
+            const spinner = document.getElementById('gpx-spinner');
+            
+            if (fileInput.files.length === 0) {
+                alert("Please select a GPX file first!");
+                return;
+            }
+
+            // 1. Show the spinner
+            spinner.classList.remove('hidden');
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            try {
+                const response = await fetch('http://127.0.0.1:8000/upload-gpx', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${localStorage.getItem('tor_token')}`
+                    },
+                    body: formData
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    alert(`Success! Found ${result.tors_bagged} new tors in your hike.`);
+                    loadMapData(); // Refresh the map to show new bags
+                } else {
+                    const error = await response.json();
+                    alert("Upload failed: " + error.detail);
+                }
+            } catch (err) {
+                console.error(err);
+                alert("An error occurred during upload.");
+            } finally {
+                // 2. Hide the spinner regardless of success or failure
+                spinner.classList.add('hidden');
+            }
+        }
+
+        // --- ADMIN / SUGGESTION FUNCTIONS ---
+        function openNewTorForm() {
+            showStatus("Click on the map to set coordinates.");
+            map.once('click', (e) => {
+                const n = prompt("Tor Name:");
+                if(n) submitSuggestion(n, e.latlng.lat, e.latlng.lng, 0, null);
+            });
+        }
+
+        function openEditForm(id, n, la, lo, el) {
+            const nn = prompt("New Name:", n);
+            if(nn) submitSuggestion(nn, la, lo, el, id);
+        }
+
+        async function submitSuggestion(n, la, lo, el, id) {
+            await fetch('http://127.0.0.1:8000/tors/suggest', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ suggested_name: n, suggested_lat: la, suggested_lon: lo, suggested_elevation: el, tor_id: id })
+            });
+            showStatus("Suggestion sent!");
+        }
+
+        async function loadSuggestions() {
+            const res = await fetch('http://127.0.0.1:8000/admin/suggestions', {
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+            });
+            const data = await res.json();
+            const list = document.getElementById('suggestion-list');
+            
+            if (data.length === 0) {
+                list.innerHTML = "No pending suggestions.";
+                return;
+            }
+
+            list.innerHTML = data.map(s => `
+                <div class="panel" style="background:#fff; font-size:0.75rem; border-left: 5px solid #3498db;">
+                    <strong>${s.tor_id ? 'CORRECTION' : 'NEW TOR'}</strong> for "${s.suggested_name}"
+                    <input type="text" id="an-${s.id}" value="${s.suggested_name}" placeholder="Name">
+                    <div style="display:flex; gap:5px;">
+                        <input type="number" step="any" id="ala-${s.id}" value="${s.suggested_lat}">
+                        <input type="number" step="any" id="alo-${s.id}" value="${s.suggested_lon}">
+                    </div>
+                    <textarea id="adesc-${s.id}" style="height: 80px; font-size: 0.75rem;" placeholder="Description">${s.suggested_description || ''}</textarea>
+                    
+                    <button class="btn-admin" onclick="approveS(${s.id}, ${s.tor_id})">Approve & Publish</button>
+                </div>
+            `).join('');
+        }
+
+// index.html -> update approveS()
+        async function approveS(sid, torid) {
+            const payload = {
+                suggested_name: document.getElementById(`an-${sid}`).value,
+                suggested_lat: parseFloat(document.getElementById(`ala-${sid}`).value),
+                suggested_lon: parseFloat(document.getElementById(`alo-${sid}`).value),
+                suggested_elevation: 0, 
+                suggested_description: document.getElementById(`adesc-${sid}`).value, // NEW
+                tor_id: torid
+            };
+
+            await fetch(`http://127.0.0.1:8000/admin/approve/${sid}`, {
+                method: 'POST',
+                headers: { 
+                    'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 
+                    'Content-Type': 'application/json' 
+                },
+                body: JSON.stringify(payload)
+            });
+            loadSuggestions();
+            loadMapData();
+        }
+
+        async function loadLeaderboard() {
+            const res = await fetch('http://127.0.0.1:8000/leaderboard');
+            const data = await res.json();
+            document.getElementById('leaderboard-body').innerHTML = data.map(r => `<tr><td>${r.rank}</td><td>${r.username}</td><td>${r.total_bagged}</td></tr>`).join('');
+        }
+
+        async function updateStatsUI() {
+            const res = await fetch('http://127.0.0.1:8000/my-bagged-tors', {
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+            });
+            const data = await res.json(); // Assuming this returns { count: X, logs: [...] }
+
+            document.getElementById('stat-count').innerText = data.count;
+            
+            // Update progress bar (assuming 200 total tors for now)
+            const progress = (data.count / 200) * 100;
+            document.getElementById('stat-progress').style.width = `${progress}%`;
+
+            // POPULATE THE LIST
+            const list = document.getElementById('bagged-tors-list');
+            if (data.logs && data.logs.length > 0) {
+                list.innerHTML = data.logs.map(log => `
+                    <li style="padding: 8px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between;">
+                        <span>⛰️ <strong>${log.tor_name}</strong></span>
+                        <span style="color: #888; font-size: 0.8rem;">${new Date(log.bagged_at).toLocaleDateString()}</span>
+                    </li>
+                `).join('');
+            } else {
+                list.innerHTML = "<li style='color: #999;'>No tors bagged yet. Time to hike!</li>";
+            }
+        }
+
+        checkAuth();
+    </script>
+</body>
+</html>
