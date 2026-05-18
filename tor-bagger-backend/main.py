@@ -232,26 +232,38 @@ async def upload_gpx(file: UploadFile = File(...), current_user: models.User = D
 
     bagging_radius = 150.0
     near_miss_radius = 500.0
-    closest_distances = {}
+    # tor_id -> {"distance": float, "time": datetime|None} for the closest GPX point
+    closest = {}
 
     for track in gpx.tracks:
         for segment in track.segments:
             for point in segment.points:
                 for tor in all_tors:
-                    if tor.id not in already_bagged_ids:
-                        distance = calculate_distance_meters(point.latitude, point.longitude, tor.lat, tor.lon)
-                        if tor.id not in closest_distances:
-                            closest_distances[tor.id] = distance
-                        else:
-                            closest_distances[tor.id] = min(closest_distances[tor.id], distance)
+                    if tor.id in already_bagged_ids:
+                        continue
+                    distance = calculate_distance_meters(point.latitude, point.longitude, tor.lat, tor.lon)
+                    prev = closest.get(tor.id)
+                    if prev is None or distance < prev["distance"]:
+                        closest[tor.id] = {"distance": distance, "time": point.time}
 
     bagged_this_trip = []
     near_misses = []
 
-    for tor_id, min_dist in closest_distances.items():
+    for tor_id, approach in closest.items():
         tor = next(t for t in all_tors if t.id == tor_id)
+        min_dist = approach["distance"]
+        point_time = approach["time"]
+        # gpxpy returns tz-aware UTC datetimes; the model stores naive UTC.
+        if point_time is not None and point_time.tzinfo is not None:
+            point_time = point_time.replace(tzinfo=None)
+
         if min_dist <= bagging_radius:
-            new_log = models.Logbook(user_id=current_user.id, tor_id=tor.id, distance_meters=min_dist)
+            new_log = models.Logbook(
+                user_id=current_user.id,
+                tor_id=tor.id,
+                distance_meters=min_dist,
+                bagged_at=point_time or datetime.utcnow(),
+            )
             db.add(new_log)
             bagged_this_trip.append(tor.name)
         elif min_dist <= near_miss_radius:
@@ -277,10 +289,11 @@ def get_my_bagged_tors(current_user: models.User = Depends(get_current_user), db
     stats_data = []
     for log in logs:
         stats_data.append({
+            "tor_id": log.tor_id,
             "tor_name": log.tor.name,
             "bagged_at": log.bagged_at.isoformat() if log.bagged_at else None
         })
-        
+
     return {
         "count": len(logs),
         "logs": stats_data
@@ -370,19 +383,3 @@ def approve_tor(s_id: int, updated_data: TorSuggestionCreate, current_user: mode
     db.commit()
     return {"message": "Master database updated!"}
 
-@app.get("/my-stats")
-def get_stats(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    logs = db.query(models.Logbook).filter_by(user_id=current_user.id).all()
-    
-    # We include the name so the frontend doesn't have to look it up
-    stats_data = []
-    for log in logs:
-        stats_data.append({
-            "tor_name": log.tor.name,
-            "visited_at": log.visited_at
-        })
-        
-    return {
-        "count": len(logs),
-        "logs": stats_data
-    }
