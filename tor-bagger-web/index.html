@@ -82,6 +82,10 @@
         </div>
 
         <div id="map-panel" class="panel hidden tab-content">
+            <h3>Find a Tor</h3>
+            <input type="text" id="tor-search" placeholder="Type a name…" oninput="searchTors(this.value)" autocomplete="off">
+            <div id="tor-search-results" class="hidden" style="background: white; border: 1px solid #ddd; border-radius: 4px; max-height: 220px; overflow-y: auto; margin-top: 4px;"></div>
+            <hr style="margin: 18px 0;">
             <h3>GPS Upload</h3>
             <input type="file" id="gpx-file" accept=".gpx">
             <button onclick="uploadGPX()">Analyze Hike</button>
@@ -123,12 +127,31 @@
         <div id="status-box" class="hidden"></div>
     </div>
 
+    <div id="suggest-modal" class="hidden" style="position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 2000; display: flex; align-items: center; justify-content: center;">
+        <div style="background: white; padding: 24px; border-radius: 8px; width: 90%; max-width: 440px; box-shadow: 0 6px 24px rgba(0,0,0,0.2);">
+            <h3 id="suggest-modal-title" style="margin: 0 0 4px;">Suggest Correction</h3>
+            <div id="suggest-modal-coords" style="font-size: 0.8rem; color: #666; margin-bottom: 12px;"></div>
+            <label style="font-size: 0.85rem; color: #333;">Name</label>
+            <input type="text" id="suggest-name">
+            <label style="font-size: 0.85rem; color: #333; display: block; margin-top: 8px;">Elevation (m)</label>
+            <input type="number" id="suggest-elev" min="0">
+            <label style="font-size: 0.85rem; color: #333; display: block; margin-top: 8px;">Description</label>
+            <textarea id="suggest-desc" style="min-height: 90px; resize: vertical;"></textarea>
+            <div style="display: flex; gap: 8px; margin-top: 16px;">
+                <button onclick="closeSuggestModal()" style="background: #95a5a6;">Cancel</button>
+                <button onclick="submitSuggestModal()">Submit</button>
+            </div>
+        </div>
+    </div>
+
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
         const map = L.map('map').setView([50.5719, -3.9811], 11);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-        let currentRouteLine = null; 
+        let currentRouteLine = null;
         let markers = L.layerGroup().addTo(map);
+        let torsById = new Map();
+        let markersByTorId = new Map();
         let statusTimeout;
 
         function switchTab(tabId) {
@@ -194,6 +217,8 @@
 
         async function loadMapData() {
             markers.clearLayers();
+            torsById.clear();
+            markersByTorId.clear();
             const torsRes = await fetch('http://127.0.0.1:8000/tors');
             const torsData = await torsRes.json();
             let baggedIds = [];
@@ -237,11 +262,52 @@
                 if(isBagged) {
                     popup += `<hr><textarea id="c-${tor.id}" placeholder="Review..." style="height:30px"></textarea><button onclick="submitReview(${tor.id})" style="padding:4px; font-size:0.7rem">Rate 5⭐</button>`;
                 }
-                popup += `<br><a href="#" onclick="openEditForm(${tor.id}, '${tor.name}', ${tor.lat}, ${tor.lon}, ${tor.elevation_m})" style="font-size:0.7rem; color:#3498db">Suggest Correction</a></div>`;
+                popup += `<br><a href="#" onclick="openEditForm(${tor.id}); return false;" style="font-size:0.7rem; color:#3498db">Suggest Correction</a></div>`;
                 
                 marker.bindPopup(popup).on('popupopen', () => fetchReviews(tor.id));
                 markers.addLayer(marker);
+                torsById.set(tor.id, tor);
+                markersByTorId.set(tor.id, marker);
             });
+        }
+
+        function searchTors(query) {
+            const resultsBox = document.getElementById('tor-search-results');
+            const q = query.trim().toLowerCase();
+            if (q.length < 2) {
+                resultsBox.classList.add('hidden');
+                resultsBox.innerHTML = '';
+                return;
+            }
+            const matches = [...torsById.values()]
+                .filter(t => t.name.toLowerCase().includes(q))
+                .sort((a, b) => {
+                    const an = a.name.toLowerCase();
+                    const bn = b.name.toLowerCase();
+                    const aStarts = an.startsWith(q);
+                    const bStarts = bn.startsWith(q);
+                    if (aStarts !== bStarts) return aStarts ? -1 : 1;
+                    return an.localeCompare(bn);
+                })
+                .slice(0, 8);
+            if (matches.length === 0) {
+                resultsBox.innerHTML = '<div style="padding: 10px; color: #999; font-size: 0.85rem;">No matches</div>';
+            } else {
+                resultsBox.innerHTML = matches.map(t =>
+                    `<div onclick="selectTor(${t.id})" style="padding: 8px 10px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 0.9rem;" onmouseover="this.style.background='#f0f0f0'" onmouseout="this.style.background='white'">⛰️ <strong>${t.name}</strong> <span style="color: #888; float: right;">${t.elevation_m || 0}m</span></div>`
+                ).join('');
+            }
+            resultsBox.classList.remove('hidden');
+        }
+
+        function selectTor(torId) {
+            const tor = torsById.get(torId);
+            const marker = markersByTorId.get(torId);
+            if (!tor || !marker) return;
+            map.flyTo([tor.lat, tor.lon], 14, { duration: 0.8 });
+            marker.openPopup();
+            document.getElementById('tor-search').value = '';
+            document.getElementById('tor-search-results').classList.add('hidden');
         }
 
         function updateDashboard(logs, totalTors) {
@@ -339,34 +405,85 @@
         }
 
         // --- ADMIN / SUGGESTION FUNCTIONS ---
+        let suggestModalContext = null;
+
+        function openSuggestModal({ title, lat, lon, name, elevation, description, torId }) {
+            document.getElementById('suggest-modal-title').textContent = title;
+            document.getElementById('suggest-modal-coords').textContent = `📍 ${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+            document.getElementById('suggest-name').value = name || '';
+            document.getElementById('suggest-elev').value = (elevation ?? '') === '' ? '' : elevation;
+            document.getElementById('suggest-desc').value = description || '';
+            suggestModalContext = { lat, lon, torId };
+            document.getElementById('suggest-modal').classList.remove('hidden');
+            document.getElementById('suggest-name').focus();
+        }
+
+        function closeSuggestModal() {
+            suggestModalContext = null;
+            document.getElementById('suggest-modal').classList.add('hidden');
+        }
+
+        async function submitSuggestModal() {
+            if (!suggestModalContext) return;
+            const name = document.getElementById('suggest-name').value.trim();
+            const elev = parseInt(document.getElementById('suggest-elev').value, 10);
+            const desc = document.getElementById('suggest-desc').value.trim();
+            if (!name) { showStatus("Name is required", true); return; }
+            if (Number.isNaN(elev)) { showStatus("Elevation must be a number", true); return; }
+
+            try {
+                const res = await fetch('http://127.0.0.1:8000/tors/suggest', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        suggested_name: name,
+                        suggested_lat: suggestModalContext.lat,
+                        suggested_lon: suggestModalContext.lon,
+                        suggested_elevation: elev,
+                        suggested_description: desc || null,
+                        tor_id: suggestModalContext.torId,
+                    })
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    showStatus("Submission failed: " + (err.detail || res.statusText), true);
+                    return;
+                }
+                closeSuggestModal();
+                showStatus("Suggestion sent!");
+            } catch (e) {
+                showStatus("Connection error", true);
+            }
+        }
+
         function openNewTorForm() {
             showStatus("Click on the map to set coordinates.");
             map.once('click', (e) => {
-                const n = prompt("Tor Name:");
-                if(!n) return;
-                const elevRaw = prompt("Elevation (metres):", "0");
-                const elev = parseInt(elevRaw, 10);
-                if(Number.isNaN(elev)) { showStatus("Invalid elevation", true); return; }
-                submitSuggestion(n, e.latlng.lat, e.latlng.lng, elev, null);
+                openSuggestModal({
+                    title: 'Add a Missing Tor',
+                    lat: e.latlng.lat,
+                    lon: e.latlng.lng,
+                    name: '',
+                    elevation: '',
+                    description: '',
+                    torId: null,
+                });
             });
         }
 
-        function openEditForm(id, n, la, lo, el) {
-            const nn = prompt("New Name:", n);
-            if(!nn) return;
-            const elevRaw = prompt("Elevation (metres):", el);
-            const elev = parseInt(elevRaw, 10);
-            if(Number.isNaN(elev)) { showStatus("Invalid elevation", true); return; }
-            submitSuggestion(nn, la, lo, elev, id);
-        }
-
-        async function submitSuggestion(n, la, lo, el, id) {
-            await fetch('http://127.0.0.1:8000/tors/suggest', {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ suggested_name: n, suggested_lat: la, suggested_lon: lo, suggested_elevation: el, tor_id: id })
+        function openEditForm(torId) {
+            const tor = torsById.get(torId);
+            if (!tor) { showStatus("Tor not found", true); return; }
+            map.closePopup();
+            openSuggestModal({
+                title: 'Suggest Correction',
+                lat: tor.lat,
+                lon: tor.lon,
+                name: tor.name,
+                elevation: tor.elevation_m ?? '',
+                description: tor.description || '',
+                torId: tor.id,
             });
-            showStatus("Suggestion sent!");
         }
 
         async function loadSuggestions() {
@@ -392,7 +509,10 @@
                     <input type="number" id="ael-${s.id}" value="${s.suggested_elevation ?? 0}" placeholder="Elevation (m)">
                     <textarea id="adesc-${s.id}" style="height: 80px; font-size: 0.75rem;" placeholder="Description">${s.suggested_description || ''}</textarea>
 
-                    <button class="btn-admin" onclick="approveS(${s.id}, ${s.tor_id})">Approve & Publish</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn-admin" onclick="approveS(${s.id}, ${s.tor_id})" style="flex: 1;">Approve & Publish</button>
+                        <button class="btn-logout" onclick="rejectS(${s.id})" style="flex: 1; margin-top: 10px;">Reject</button>
+                    </div>
                 </div>
             `).join('');
         }
@@ -410,14 +530,29 @@
 
             await fetch(`http://127.0.0.1:8000/admin/approve/${sid}`, {
                 method: 'POST',
-                headers: { 
-                    'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 
-                    'Content-Type': 'application/json' 
+                headers: {
+                    'Authorization': `Bearer ${localStorage.getItem('tor_token')}`,
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(payload)
             });
             loadSuggestions();
             loadMapData();
+        }
+
+        async function rejectS(sid) {
+            if (!confirm("Reject this suggestion?")) return;
+            const res = await fetch(`http://127.0.0.1:8000/admin/reject/${sid}`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                showStatus("Reject failed: " + (err.detail || res.statusText), true);
+                return;
+            }
+            showStatus("Suggestion rejected.");
+            loadSuggestions();
         }
 
         async function loadLeaderboard() {
