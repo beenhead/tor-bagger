@@ -116,6 +116,7 @@ def suggest_tor(suggestion: TorSuggestionCreate, current_user: models.User = Dep
         suggested_lat=suggestion.suggested_lat,
         suggested_lon=suggestion.suggested_lon,
         suggested_elevation=suggestion.suggested_elevation,
+        suggested_description=suggestion.suggested_description,
         status="pending"
     )
     db.add(new_suggestion)
@@ -187,6 +188,7 @@ def get_all_tors(db: Session = Depends(get_db)):
             "lat": tor.lat,
             "lon": tor.lon,
             "elevation_m": tor.elevation_m,
+            "description": tor.description,
             "avg_rating": round(avg_rating, 1) if avg_rating else 0,
             "review_count": review_count
         }
@@ -342,14 +344,18 @@ def get_suggestions(current_user: models.User = Depends(get_current_user), db: S
         raise HTTPException(status_code=403, detail="Admin only")
     return db.query(models.TorSuggestion).filter_by(status="pending").all()
 
-@app.post("/admin/suggestions/{suggestion_id}/approve")
-def approve_suggestion(suggestion_id: int, current_user: models.User = Depends(get_db)):
-    # Logic: 
-    # 1. Get suggestion
-    # 2. If tor_id exists, update that Tor
-    # 3. If tor_id is null, create a new Tor
-    # 4. Set suggestion status to 'approved'
-    pass # Implementation details below
+@app.post("/admin/reject/{s_id}")
+def reject_suggestion(s_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    suggestion = db.query(models.TorSuggestion).filter_by(id=s_id).first()
+    if not suggestion:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+
+    suggestion.status = "rejected"
+    db.commit()
+    return {"message": "Suggestion rejected."}
 
 @app.post("/admin/approve/{s_id}")
 def approve_tor(s_id: int, updated_data: TorSuggestionCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
