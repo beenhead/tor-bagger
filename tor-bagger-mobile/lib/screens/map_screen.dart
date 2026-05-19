@@ -29,7 +29,57 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
-    _refresh();
+    _refresh().then((_) => _maybeShowIntro());
+  }
+
+  Future<void> _maybeShowIntro() async {
+    if (await widget.auth.hasSeenIntro()) return;
+    if (!mounted) return;
+    await _showIntro();
+    await widget.auth.markIntroSeen();
+  }
+
+  Future<void> _showIntro() {
+    return showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Welcome to Tor Bagger ⛰️', style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 12),
+            const _HelpRow(
+              icon: Icons.location_on,
+              text: 'Grey pins are un-bagged Tors. Green pins are ones you\'ve already bagged.',
+            ),
+            const _HelpRow(
+              icon: Icons.touch_app,
+              text: 'Tap a pin to see the Tor\'s name and elevation.',
+            ),
+            const _HelpRow(
+              icon: Icons.flag,
+              text: '"Bag This Tor" uses your GPS to confirm you\'re within 150m of the summit.',
+            ),
+            const _HelpRow(
+              icon: Icons.refresh,
+              text: 'Tap refresh in the top bar to re-sync your bagged list from the server.',
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Got it'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _refresh() async {
@@ -140,6 +190,7 @@ class _MapScreenState extends State<MapScreen> {
       appBar: AppBar(
         title: const Text('⛰️ Tor Bagger'),
         actions: [
+          IconButton(icon: const Icon(Icons.help_outline), onPressed: _showIntro, tooltip: 'How it works'),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _loading ? null : _refresh),
           IconButton(icon: const Icon(Icons.logout), onPressed: _logout),
         ],
@@ -212,6 +263,27 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HelpRow extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  const _HelpRow({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 12),
+          Expanded(child: Text(text, style: Theme.of(context).textTheme.bodyMedium)),
         ],
       ),
     );

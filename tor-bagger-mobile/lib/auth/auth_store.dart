@@ -3,6 +3,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 class AuthStore {
   static const _tokenKey = 'tor_token';
   static const _isAdminKey = 'is_admin';
+  static const _seenIntroKey = 'seen_intro';
 
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
 
@@ -18,5 +19,10 @@ class AuthStore {
   Future<void> clear() async {
     await _storage.delete(key: _tokenKey);
     await _storage.delete(key: _isAdminKey);
+    // Intentionally preserve _seenIntroKey across logouts.
   }
+
+  Future<bool> hasSeenIntro() async => (await _storage.read(key: _seenIntroKey)) == 'true';
+
+  Future<void> markIntroSeen() => _storage.write(key: _seenIntroKey, value: 'true');
 }

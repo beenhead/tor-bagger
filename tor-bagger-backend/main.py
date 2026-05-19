@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
@@ -9,6 +9,12 @@ import gpxpy
 import bcrypt
 import jwt
 import os
+import secrets
+import hashlib
+import hmac
+import base64
+import json
+import requests as http_requests
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
@@ -34,9 +40,15 @@ load_dotenv()
 
 # --- JWT CONFIGURATION ---
 # This will now safely grab the key from your .env file!
-SECRET_KEY = os.getenv("SECRET_KEY") 
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+
+# --- EMAIL / RESET CONFIG ---
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+RESEND_FROM = os.getenv("RESEND_FROM", "Tor Bagger <onboarding@resend.dev>")
+WEB_BASE_URL = os.getenv("WEB_BASE_URL", "http://localhost:5500")
+PASSWORD_RESET_TTL_HOURS = 1
 
 # This tells FastAPI where the login endpoint is for Swagger UI
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -389,3 +401,162 @@ def approve_tor(s_id: int, updated_data: TorSuggestionCreate, current_user: mode
     db.commit()
     return {"message": "Master database updated!"}
 
+
+# --- PASSWORD RESET ---
+class PasswordResetRequest(BaseModel):
+    email: str
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: str = Field(..., max_length=72)
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def _send_password_reset_email(to_email: str, token: str):
+    link = f"{WEB_BASE_URL}/?reset_token={token}"
+    if not RESEND_API_KEY:
+        # Dev fallback so resets work without email infrastructure.
+        print(f"[DEV] Password reset link for {to_email}: {link}")
+        return
+    resp = http_requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "from": RESEND_FROM,
+            "to": [to_email],
+            "subject": "Tor Bagger — Reset your password",
+            "html": (
+                f"<p>Someone (hopefully you) requested a password reset for your Tor Bagger account.</p>"
+                f'<p><a href="{link}">Click here to choose a new password</a></p>'
+                f"<p>The link expires in {PASSWORD_RESET_TTL_HOURS} hour(s). If you didn't request this, you can ignore this email.</p>"
+            ),
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+@app.post("/password-reset/request")
+def request_password_reset(req: PasswordResetRequest, db: Session = Depends(get_db)):
+    # Always return the same response — don't reveal whether the email is registered.
+    user = db.query(models.User).filter(models.User.email == req.email).first()
+    if user:
+        # Invalidate any unused reset tokens for this user.
+        db.query(models.PasswordResetToken).filter(
+            models.PasswordResetToken.user_id == user.id,
+            models.PasswordResetToken.used_at.is_(None),
+        ).update({"used_at": datetime.utcnow()})
+
+        token = secrets.token_urlsafe(32)
+        db.add(models.PasswordResetToken(
+            user_id=user.id,
+            token_hash=_hash_token(token),
+            expires_at=datetime.utcnow() + timedelta(hours=PASSWORD_RESET_TTL_HOURS),
+        ))
+        db.commit()
+        try:
+            _send_password_reset_email(user.email, token)
+        except Exception as e:
+            # Don't 500 — keep the response enumeration-resistant.
+            print(f"[ERROR] Failed to send password reset email to {user.email}: {e}")
+    return {"message": "If an account exists for that email, a reset link has been sent."}
+
+@app.post("/password-reset/confirm")
+def confirm_password_reset(req: PasswordResetConfirm, db: Session = Depends(get_db)):
+    row = db.query(models.PasswordResetToken).filter_by(token_hash=_hash_token(req.token)).first()
+    if not row or row.used_at is not None or row.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link.")
+    user = db.query(models.User).filter_by(id=row.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid reset link.")
+    user.hashed_password = get_password_hash(req.new_password)
+    row.used_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Password updated. You can now log in."}
+
+
+# --- SIGNED EXPORT / IMPORT ---
+def _canonical_json(obj) -> bytes:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
+
+def _sign_payload(payload: dict) -> str:
+    sig = hmac.new(SECRET_KEY.encode(), _canonical_json(payload), hashlib.sha256).digest()
+    return base64.b64encode(sig).decode()
+
+def _verify_signature(payload: dict, signature: str) -> bool:
+    return hmac.compare_digest(_sign_payload(payload), signature)
+
+@app.get("/my-bagged-tors/export")
+def export_my_bagged_tors(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logs = db.query(models.Logbook).filter_by(user_id=current_user.id).all()
+    payload = {
+        "version": 1,
+        "user_id": current_user.id,
+        "username": current_user.username,
+        "exported_at": datetime.utcnow().isoformat(),
+        "logs": [
+            {
+                "tor_id": log.tor_id,
+                "tor_name": log.tor.name,
+                "bagged_at": log.bagged_at.isoformat() if log.bagged_at else None,
+                "distance_meters": log.distance_meters,
+            }
+            for log in logs
+        ],
+    }
+    blob = {"payload": payload, "signature": _sign_payload(payload)}
+    body = json.dumps(blob, indent=2)
+    filename = f"tor-bagger-{current_user.username}.torbag"
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+@app.post("/my-bagged-tors/import")
+async def import_my_bagged_tors(file: UploadFile = File(...), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    contents = await file.read()
+    try:
+        blob = json.loads(contents)
+        payload = blob["payload"]
+        signature = blob["signature"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        raise HTTPException(status_code=400, detail="Not a valid Tor Bagger export file.")
+    if not _verify_signature(payload, signature):
+        raise HTTPException(status_code=400, detail="Signature verification failed. The file has been modified or wasn't issued by this server.")
+    if payload.get("user_id") != current_user.id:
+        raise HTTPException(status_code=400, detail="This export belongs to a different account.")
+
+    def _key(tor_id, bagged_at):
+        return (tor_id, bagged_at.replace(microsecond=0) if bagged_at else None)
+
+    existing = db.query(models.Logbook).filter_by(user_id=current_user.id).all()
+    existing_keys = {_key(log.tor_id, log.bagged_at) for log in existing}
+
+    imported = 0
+    skipped = 0
+    for entry in payload.get("logs", []):
+        tor_id = entry.get("tor_id")
+        bagged_at_iso = entry.get("bagged_at")
+        try:
+            bagged_at = datetime.fromisoformat(bagged_at_iso.rstrip("Z")) if bagged_at_iso else None
+        except (ValueError, AttributeError):
+            skipped += 1
+            continue
+        if bagged_at and bagged_at.tzinfo is not None:
+            bagged_at = bagged_at.replace(tzinfo=None)
+        if _key(tor_id, bagged_at) in existing_keys:
+            skipped += 1
+            continue
+        if not db.query(models.Tor).filter_by(id=tor_id).first():
+            skipped += 1
+            continue
+        db.add(models.Logbook(
+            user_id=current_user.id,
+            tor_id=tor_id,
+            bagged_at=bagged_at,
+            distance_meters=entry.get("distance_meters"),
+        ))
+        imported += 1
+    db.commit()
+    return {"imported": imported, "skipped": skipped, "total_in_file": len(payload.get("logs", []))}

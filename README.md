@@ -75,9 +75,15 @@ Create a `.env` file in `tor-bagger-backend/` containing:
 
 ```
 SECRET_KEY=replace-me-with-a-long-random-string
+
+# Password reset emails (optional in dev — without RESEND_API_KEY, the reset
+# link is just printed to the uvicorn console instead of emailed).
+RESEND_API_KEY=
+RESEND_FROM=Tor Bagger <onboarding@resend.dev>
+WEB_BASE_URL=http://localhost:5500
 ```
 
-(Used to sign JWTs — any long, random value works.)
+`SECRET_KEY` signs JWTs *and* the signed logbook exports — keep it stable so existing exports remain importable. `WEB_BASE_URL` is where password-reset links point; serve the web frontend with `python -m http.server 5500` from `tor-bagger-web/` so the link in the email actually opens something. To enable real email sending in production, sign up at [resend.com](https://resend.com) and paste the API key.
 
 Register at least one user via the `/register` endpoint and flip `is_admin = true` in MySQL for the user the scraper should attribute its harvested suggestions to. Then seed the master tor data:
 

@@ -79,6 +79,25 @@
             <input type="text" id="username" placeholder="Username">
             <input type="password" id="password" placeholder="Password">
             <button onclick="handleLogin()">Sign In</button>
+            <div style="text-align: center; margin-top: 10px;">
+                <a href="#" onclick="showResetRequest(); return false;" style="font-size: 0.85rem; color: #3498db;">Forgot password?</a>
+            </div>
+        </div>
+
+        <div id="reset-request-panel" class="panel hidden">
+            <h3>Reset Password</h3>
+            <p style="font-size: 0.85rem; color: #666;">Enter your account email and we'll send a reset link.</p>
+            <input type="email" id="reset-email" placeholder="you@example.com">
+            <button onclick="handleResetRequest()">Send reset link</button>
+            <div style="text-align: center; margin-top: 10px;">
+                <a href="#" onclick="showLogin(); return false;" style="font-size: 0.85rem; color: #3498db;">Back to login</a>
+            </div>
+        </div>
+
+        <div id="reset-confirm-panel" class="panel hidden">
+            <h3>Choose a New Password</h3>
+            <input type="password" id="reset-new-password" placeholder="New password">
+            <button onclick="handleResetConfirm()">Update password</button>
         </div>
 
         <div id="map-panel" class="panel hidden tab-content">
@@ -108,6 +127,14 @@
                     <!-- Tors will be injected here -->
                 </ul>
             </div>
+            <hr style="margin: 18px 0;">
+            <h4 style="margin: 0 0 8px; color: #333;">Backup</h4>
+            <div style="display: flex; gap: 8px;">
+                <button onclick="exportLogbook()" style="flex: 1;">Export</button>
+                <button class="btn-admin" onclick="document.getElementById('import-file').click()" style="flex: 1; margin-top: 10px;">Import</button>
+            </div>
+            <input type="file" id="import-file" accept=".torbag,.json,application/json" style="display: none;" onchange="importLogbook(event)">
+            <div id="import-result" class="hidden" style="margin-top: 10px; padding: 10px; border-radius: 6px; font-size: 0.85rem;"></div>
             <button class="btn-logout" onclick="handleLogout()">Logout</button>
         </div>
 
@@ -199,20 +226,77 @@
             const isAdmin = localStorage.getItem('is_admin') === 'true';
             const logoutBtn = document.getElementById('main-logout-btn');
 
+            // Password reset link arrival — takes precedence over normal login flow.
+            const resetToken = new URLSearchParams(location.search).get('reset_token');
+            if (resetToken && !token) {
+                document.getElementById('login-panel').classList.add('hidden');
+                document.getElementById('reset-confirm-panel').classList.remove('hidden');
+                loadMapData();
+                return;
+            }
+
             if (token) {
                 document.getElementById('login-panel').classList.add('hidden');
+                document.getElementById('reset-request-panel').classList.add('hidden');
+                document.getElementById('reset-confirm-panel').classList.add('hidden');
                 document.getElementById('nav-menu').classList.remove('hidden');
                 document.getElementById('map-panel').classList.remove('hidden');
-                
-                // Show the logout button
+
                 if (logoutBtn) logoutBtn.classList.remove('hidden');
-                
                 if (isAdmin) document.getElementById('admin-nav-btn').classList.remove('hidden');
             } else {
-                // Hide it if logged out
                 if (logoutBtn) logoutBtn.classList.add('hidden');
             }
             loadMapData();
+        }
+
+        function showResetRequest() {
+            document.getElementById('login-panel').classList.add('hidden');
+            document.getElementById('reset-request-panel').classList.remove('hidden');
+        }
+
+        function showLogin() {
+            document.getElementById('reset-request-panel').classList.add('hidden');
+            document.getElementById('reset-confirm-panel').classList.add('hidden');
+            document.getElementById('login-panel').classList.remove('hidden');
+        }
+
+        async function handleResetRequest() {
+            const email = document.getElementById('reset-email').value.trim();
+            if (!email) { showStatus("Email is required", true); return; }
+            try {
+                const res = await fetch('http://127.0.0.1:8000/password-reset/request', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                const data = await res.json();
+                showStatus(data.message || "Check your inbox.");
+            } catch (e) {
+                showStatus("Connection error", true);
+            }
+        }
+
+        async function handleResetConfirm() {
+            const token = new URLSearchParams(location.search).get('reset_token');
+            const newPassword = document.getElementById('reset-new-password').value;
+            if (!newPassword) { showStatus("Enter a new password", true); return; }
+            try {
+                const res = await fetch('http://127.0.0.1:8000/password-reset/confirm', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token, new_password: newPassword })
+                });
+                const data = await res.json();
+                if (!res.ok) { showStatus(data.detail || "Reset failed", true); return; }
+                // Strip the token from the URL and return to login.
+                history.replaceState({}, '', location.pathname);
+                document.getElementById('reset-confirm-panel').classList.add('hidden');
+                document.getElementById('login-panel').classList.remove('hidden');
+                showStatus(data.message || "Password updated. Sign in with your new password.");
+            } catch (e) {
+                showStatus("Connection error", true);
+            }
         }
 
         async function loadMapData() {
@@ -553,6 +637,60 @@
             }
             showStatus("Suggestion rejected.");
             loadSuggestions();
+        }
+
+        async function exportLogbook() {
+            try {
+                const res = await fetch('http://127.0.0.1:8000/my-bagged-tors/export', {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+                });
+                if (!res.ok) { showStatus("Export failed", true); return; }
+                const blob = await res.blob();
+                const dispo = res.headers.get('Content-Disposition') || '';
+                const m = dispo.match(/filename="?([^"]+)"?/);
+                const filename = m ? m[1] : 'tor-bagger-export.torbag';
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                showStatus("Export downloaded.");
+            } catch (e) {
+                showStatus("Connection error", true);
+            }
+        }
+
+        async function importLogbook(event) {
+            const file = event.target.files[0];
+            event.target.value = ''; // allow re-importing the same file
+            const box = document.getElementById('import-result');
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('http://127.0.0.1:8000/my-bagged-tors/import', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` },
+                    body: formData
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    box.className = 'error';
+                    box.textContent = data.detail || "Import failed";
+                } else {
+                    box.className = 'success';
+                    box.innerHTML = `<strong>Imported ${data.imported}</strong> new entries, skipped ${data.skipped} (already in your logbook or invalid). ${data.total_in_file} entries in file.`;
+                    loadMapData();
+                }
+                box.classList.remove('hidden');
+            } catch (e) {
+                box.className = 'error';
+                box.textContent = "Connection error";
+                box.classList.remove('hidden');
+            }
         }
 
         async function loadLeaderboard() {
