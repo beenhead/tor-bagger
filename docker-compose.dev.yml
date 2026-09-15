@@ -3,8 +3,9 @@
 # Named rather than docker-compose.override.yml on purpose: an auto-loading
 # override would silently apply --reload and expose the database on a server.
 #
-# Set WEB_PORT=5500 in .env for local use — compose merges `ports` lists by
-# appending, so overriding the web port here would publish both 80 and 5500.
+# Set DOMAIN=localhost in .env for local use: Caddy then issues a certificate
+# from its own internal CA instead of trying to reach Let's Encrypt. The web
+# container is also published directly on 5500, so you can bypass TLS entirely.
 services:
   db:
     ports:
@@ -20,3 +21,7 @@ services:
     volumes:
       - ./tor-bagger-backend:/app
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  web:
+    ports:
+      - "5500:80"

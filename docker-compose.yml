@@ -37,10 +37,29 @@ services:
   web:
     build: ./tor-bagger-web
     restart: unless-stopped
-    ports:
-      - "${WEB_PORT:-80}:80"
+    # Not published — Caddy reaches it over the internal network.
     depends_on:
       - backend
 
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN must be set in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates live here. Losing this volume means re-issuing them, and
+      # Let's Encrypt rate-limits that, so keep it.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
 volumes:
   db_data:
+  caddy_data:
+  caddy_config:

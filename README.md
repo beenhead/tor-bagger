@@ -45,10 +45,10 @@ tor-bagger-mobile/    Flutter project targeting iOS and Android
 
 ## 🐳 Running with Docker
 
-`docker-compose.yml` brings up three containers: Postgres, the FastAPI backend,
-and nginx serving the static frontend *and* proxying `/api/` through to the
-backend. Because the API is same-origin, the frontend uses relative URLs and
-nothing needs to know the public hostname.
+`docker-compose.yml` brings up four containers: Postgres, the FastAPI backend,
+nginx serving the static frontend *and* proxying `/api/` through to the backend,
+and Caddy terminating TLS in front of the lot. Because the API is same-origin,
+the frontend uses relative URLs and nothing needs to know the public hostname.
 
 The compose file is production-shaped by default: only the web port is
 published, the database and backend are reachable only on the internal network,
@@ -60,9 +60,14 @@ and secrets come from a `.env` file.
 cp .env.example .env
 ```
 
-Fill in at minimum `SECRET_KEY`, `POSTGRES_PASSWORD`, and `WEB_BASE_URL`
-(generate secrets with `openssl rand -hex 32`). Compose refuses to start with
-a clear error if any of the three is missing.
+Fill in at minimum `SECRET_KEY`, `POSTGRES_PASSWORD`, `WEB_BASE_URL`, and
+`DOMAIN` (generate secrets with `openssl rand -hex 32`). Compose refuses to
+start with a clear error if any of them is missing.
+
+`DOMAIN` must be a real DNS name already pointing at the server — Caddy proves
+control of it to Let's Encrypt over ports 80 and 443, so both need to be open
+to the internet before the first start. `WEB_BASE_URL` should be the same host
+with the `https://` scheme.
 
 `SECRET_KEY` signs JWTs *and* logbook exports — keep it stable once set, or
 previously generated exports stop validating.
@@ -73,11 +78,35 @@ previously generated exports stop validating.
 docker compose up -d --build
 ```
 
-Serves on `WEB_PORT` (default 80). Seed the master tor data once the stack is
-up — note this needs an admin user to exist first, see below:
+Caddy obtains a certificate on first start and redirects HTTP to HTTPS, so the
+site comes up on `https://$DOMAIN` with no further setup. Certificates renew
+automatically and live in the `caddy_data` volume — keep that volume, because
+Let's Encrypt rate-limits re-issuance.
+
+Seed the master tor data once the stack is up — note this needs an admin user
+to exist first, see below:
 
 ```bash
 docker compose exec backend python scraper.py
+```
+
+### Creating users
+
+There is no signup form in the web UI yet — accounts are created through the
+API:
+
+```bash
+curl -X POST https://$DOMAIN/api/register \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"you","email":"you@example.com","password":"..."}'
+```
+
+Passwords are capped at 72 characters (a bcrypt limit). To grant admin rights,
+needed for the scraper and the suggestion-approval UI:
+
+```bash
+docker compose exec db psql -U tor_bagger -d tor_bagger \
+  -c "UPDATE users SET is_admin = true WHERE username = 'you';"
 ```
 
 ### Local development
@@ -87,10 +116,15 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
 The dev overlay adds uvicorn `--reload` with the backend source bind-mounted,
-publishes Postgres on 5432 and the backend on 8000, and sets `CORS_ORIGINS=*`
-so the mobile app can call the API directly. Set `WEB_PORT=5500` in `.env` for
-local use. The overlay is deliberately *not* named
-`docker-compose.override.yml`, so it can never load by accident on a server.
+publishes Postgres on 5432, the backend on 8000, and nginx directly on 5500,
+and sets `CORS_ORIGINS=*` so the mobile app can call the API directly. The
+overlay is deliberately *not* named `docker-compose.override.yml`, so it can
+never load by accident on a server.
+
+Set `DOMAIN=localhost` in `.env` for local use: Caddy then issues a certificate
+from its own internal CA rather than trying to reach Let's Encrypt, and
+`https://localhost` works (your client will not trust that CA, hence
+`curl -k`). Or bypass TLS entirely on `http://localhost:5500`.
 
 Frontend edits are baked into the web image — rerun with `--build` to pick them
 up. Database contents live in the `db_data` volume and survive
@@ -98,9 +132,9 @@ up. Database contents live in the `db_data` volume and survive
 
 ### Notes
 
-*   TLS is not handled here. For a public deployment put a reverse proxy
-    (Caddy, or nginx with certbot) in front, or terminate at a load balancer —
-    JWTs over plain HTTP are readable in transit.
+*   Caddy sends HSTS with a one-year max-age once TLS is up. Browsers will
+    then refuse plain HTTP for the domain, so don't enable it on a host you
+    intend to serve over HTTP later.
 *   `CORS_ORIGINS` should stay empty in production. The frontend is same-origin,
     so it needs no entry; native mobile apps do not enforce CORS.
 
@@ -159,7 +193,7 @@ CORS_ORIGINS=*
 
 `SECRET_KEY` signs JWTs *and* the signed logbook exports — keep it stable so existing exports remain importable. `WEB_BASE_URL` is where password-reset links point; serve the web frontend with `python -m http.server 5500` from `tor-bagger-web/` so the link in the email actually opens something. To enable real email sending in production, sign up at [resend.com](https://resend.com) and paste the API key.
 
-Register at least one user via the `/register` endpoint and flip `is_admin = true` in MySQL for the user the scraper should attribute its harvested suggestions to. Then seed the master tor data:
+Register at least one user via the `/register` endpoint and set `is_admin = true` on the user the scraper should attribute its harvested suggestions to. Then seed the master tor data:
 
 ```bash
 python scraper.py

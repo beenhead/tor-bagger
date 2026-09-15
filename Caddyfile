@@ -1,0 +1,18 @@
+# No global email is set: Let's Encrypt registration works without a contact
+# address, and an empty {$ACME_EMAIL} is a Caddyfile syntax error rather than a
+# no-op. (Let's Encrypt retired expiry notification emails in 2025 regardless.)
+{$DOMAIN} {
+	encode gzip
+
+	# nginx (the `web` container) still owns static files and the /api/ proxy;
+	# Caddy sits in front purely to terminate TLS. HTTP is redirected to HTTPS
+	# automatically, and certificates are obtained and renewed on their own.
+	reverse_proxy web:80
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}
