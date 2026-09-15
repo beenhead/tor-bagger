@@ -8,6 +8,7 @@ This project allows hikers to track their progress across the moor. It features 
 
 *   **Interactive Web Map:** A Leaflet.js powered frontend visualizing all Dartmoor Tors. Pins are color-coded by user-specific bagged / un-bagged state.
 *   **GPX Route Processing:** Upload a `.gpx` file from Strava, Garmin, or OS Maps. The engine scans the route, automatically bags any Tors you passed within 150 meters of, and dates each bag from the GPX point's own timestamp. `gpx-help.html`, linked from the upload box, walks users through exporting one from Strava.
+*   **Strava Bulk Import:** Feed in the whole-history `.zip` Strava emails you. The archive is opened *in the browser* — its activity list is read to find the walks, hikes and runs, and only those tracks are uploaded, one at a time, with a progress bar. Rides, photos and videos are never sent anywhere.
 *   **Near Miss Detection:** Agonizingly close? The app detects if you walked within 500 meters of a Tor but missed the summit, logging it as a "Near Miss."
 *   **Mobile App (lean v1):** Flutter app for iOS and Android — login, live map, GPS-based live bagging.
 *   **Secure Authentication:** Full user registration and login system protected by bcrypt password hashing and JWT (JSON Web Tokens).
@@ -169,6 +170,16 @@ TLS terminator becomes necessary — set `WEB_BIND=0.0.0.0` and put one in front
 
 *   `CORS_ORIGINS` should stay empty in production. The frontend is same-origin,
     so it needs no entry; native mobile apps do not enforce CORS.
+*   The Strava bulk import unpacks the archive in the browser rather than
+    uploading it. That is not just a nicety: Cloudflare caps request bodies at
+    100 MB on the free plan, and these archives run to several hundred MB, so an
+    upload would be rejected at the edge no matter what `client_max_body_size`
+    says. Unpacking client-side also means the photo and video half of the
+    archive — usually most of its bulk — never leaves the user's machine. Only
+    the individual walking tracks are POSTed to `/upload-gpx`, each a few MB at
+    most, comfortably inside nginx's 25 MB limit.
+*   `/upload-gpx` sniffs gzip magic bytes, so a `.gpx.gz` can be uploaded
+    directly without being unpacked first.
 
 ## 🚀 Getting Started
 

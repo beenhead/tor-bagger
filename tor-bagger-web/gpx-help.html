@@ -78,22 +78,28 @@
             Garmin Connect, export it from there as GPX and skip the conversion.</p>
     </div>
 
-    <h2>Your whole Strava history at once</h2>
+    <h2 id="bulk">Your whole Strava history at once</h2>
     <div class="card">
-        <p>Worth doing if you've been walking Dartmoor for years and want it all bagged in one go.</p>
+        <p>Worth doing if you've been walking Dartmoor for years and want it all bagged in one go.
+            <strong>Don't unzip it</strong> — Tor Bagger reads the archive as it comes.</p>
         <ol>
             <li>On strava.com, go to <strong>Settings</strong> → <strong>My Account</strong>.</li>
             <li>Click <strong>Download or Delete Your Account</strong>, then <strong>Get Started</strong>.</li>
             <li>Under the "Download Request" step, click <strong>Request Your Archive</strong>.
                 Ignore the delete options further down the page.</li>
             <li>Strava emails you a download link. It can take anywhere from a few minutes to a day or two.</li>
-            <li>Unzip it and look in the <code>activities</code> folder. Upload the <code>.gpx</code> files to Tor Bagger
-                one at a time.</li>
+            <li>On the Tor Bagger map, under <strong>Strava Bulk Import</strong>, choose the <code>.zip</code>
+                and hit <strong>Import Archive</strong>. Leave the tab open while it works through your walks.</li>
         </ol>
+        <div class="note">
+            <strong>Only your walks are read.</strong> Tor Bagger looks at the archive's activity list and picks out
+            the walks, hikes and runs — rides and everything else are ignored, on the basis that a Tor counts when you
+            get there on foot. Your photos and videos are never opened and never leave your computer: the zip is
+            unpacked in your browser, and only the walking tracks are sent on.
+        </div>
         <div class="warn">
-            The archive contains files in whatever format each activity was originally recorded in, so expect a mix of
-            <code>.gpx</code>, <code>.fit</code> and <code>.tcx</code> — and many will be gzipped
-            (<code>.gpx.gz</code>), which you'll need to unzip again before uploading.
+            These archives are big — often several hundred MB, mostly photos. Picking it straight from your Downloads
+            folder is fine; there's no need to move or extract it first.
         </div>
     </div>
 
