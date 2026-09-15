@@ -20,7 +20,7 @@ This project allows hikers to track their progress across the moor. It features 
 *   Python 3.x
 *   FastAPI (web framework & API)
 *   SQLAlchemy (ORM)
-*   MySQL (database)
+*   MySQL or PostgreSQL (database — pick whichever; selected via `DATABASE_URL`)
 *   PyJWT & bcrypt (security & auth)
 *   gpxpy (GPX file parsing)
 *   BeautifulSoup4 & requests (scraper)
@@ -43,24 +43,69 @@ tor-bagger-web/       Static index.html — open directly in a browser
 tor-bagger-mobile/    Flutter project targeting iOS and Android
 ```
 
+## 🐳 Running with Docker (quickest route)
+
+`docker-compose.yml` brings up three containers: Postgres, the FastAPI backend,
+and an nginx container serving the static web frontend. No local Python, MySQL,
+or Postgres install needed.
+
+You still need `tor-bagger-backend/.env` for `SECRET_KEY` (and optionally
+`RESEND_API_KEY`). `DATABASE_URL` is set by Compose and points at the `db`
+container, so whatever is in `.env` for local runs is ignored inside Docker.
+
+```bash
+docker compose up --build        # or: docker-compose up --build
+```
+
+*   Web frontend → http://localhost:5500
+*   API + Swagger docs → http://localhost:8000/docs
+*   Postgres → `localhost:5432` (user/pass/db all `tor_bagger`)
+
+Tables are created automatically on first boot. Seed the master tor data once
+the stack is up:
+
+```bash
+docker compose exec backend python scraper.py
+```
+
+The backend mounts `tor-bagger-backend/` into the container and runs uvicorn
+with `--reload`, so Python edits take effect immediately. Edits to
+`tor-bagger-web/index.html` are baked into the image — rerun
+`docker compose up --build web` to pick them up.
+
+Database contents live in the `db_data` volume and survive `docker compose
+down`. To wipe and start fresh:
+
+```bash
+docker compose down -v
+```
+
+The frontend calls the API at `http://127.0.0.1:8000` from the browser (i.e.
+from your host), which is why the backend port is published rather than kept
+internal to the Compose network.
+
 ## 🚀 Getting Started
 
 ### Prerequisites
 
 *   **Python 3.8+**
-*   **MySQL Server** running locally
+*   **MySQL Server** *or* **PostgreSQL Server** running locally (pick one)
 *   **Flutter SDK** (only if you want to run the mobile app)
 *   **Xcode** (iOS) and/or **Android Studio with an AVD** (Android) for the mobile app
 
 ### 1. Database
 
-Log into your local MySQL server and create a blank database:
+Pick MySQL or Postgres — the schema is portable, SQLAlchemy handles both. Create a blank database:
 
 ```sql
+-- MySQL
 CREATE DATABASE tor_bagger CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- Postgres
+CREATE DATABASE tor_bagger;
 ```
 
-Then edit `tor-bagger-backend/database.py` and update `SQLALCHEMY_DATABASE_URL` with your MySQL username, password, host, and DB name.
+Then set `DATABASE_URL` in `tor-bagger-backend/.env` (see the next section). If left unset, the app falls back to a local MySQL connection string baked into `database.py`.
 
 ### 2. Backend
 
@@ -75,6 +120,11 @@ Create a `.env` file in `tor-bagger-backend/` containing:
 
 ```
 SECRET_KEY=replace-me-with-a-long-random-string
+
+# Database — pick one. If omitted, falls back to local MySQL.
+# MySQL:    DATABASE_URL=mysql+pymysql://tor_bagger:aBcDeFgH@localhost:3306/tor_bagger
+# Postgres: DATABASE_URL=postgresql://tor_bagger:aBcDeFgH@localhost:5432/tor_bagger
+DATABASE_URL=
 
 # Password reset emails (optional in dev — without RESEND_API_KEY, the reset
 # link is just printed to the uvicorn console instead of emailed).

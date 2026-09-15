@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tor_bagger
+      POSTGRES_PASSWORD: tor_bagger
+      POSTGRES_DB: tor_bagger
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      # Exposed so you can poke at the DB from the host (psql, TablePlus, etc).
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tor_bagger -d tor_bagger"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./tor-bagger-backend
+    env_file:
+      - ./tor-bagger-backend/.env
+    environment:
+      # Set here rather than in .env so the container always talks to the
+      # compose database regardless of what .env says for local runs.
+      DATABASE_URL: postgresql://tor_bagger:tor_bagger@db:5432/tor_bagger
+      WEB_BASE_URL: http://localhost:5500
+    ports:
+      # Published on 8000 because the web frontend calls http://127.0.0.1:8000
+      # from the browser, i.e. from the host, not from inside the network.
+      - "8000:8000"
+    volumes:
+      # Live reload during development; drop this line for a frozen image.
+      - ./tor-bagger-backend:/app
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: ./tor-bagger-web
+    ports:
+      - "5500:80"
+    depends_on:
+      - backend
+
+volumes:
+  db_data:
