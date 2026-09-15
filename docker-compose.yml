@@ -34,6 +34,11 @@ services:
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env}
       WEB_BASE_URL: ${WEB_BASE_URL:?WEB_BASE_URL must be set in .env}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Per-IP limits on the public endpoints — signup is open, so these
+      # are the front door. Defaults match .env.example.
+      REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-5/hour}
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10/minute}
+      PASSWORD_RESET_RATE_LIMIT: ${PASSWORD_RESET_RATE_LIMIT:-5/hour}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM: ${RESEND_FROM:-Tor Bagger <onboarding@resend.dev>}
     # Not published either — nginx proxies /api/ to it inside the network.

@@ -82,6 +82,20 @@
             <div style="text-align: center; margin-top: 10px;">
                 <a href="#" onclick="showResetRequest(); return false;" style="font-size: 0.85rem; color: #3498db;">Forgot password?</a>
             </div>
+            <div style="text-align: center; margin-top: 6px;">
+                <a href="#" onclick="showSignup(); return false;" style="font-size: 0.85rem; color: #3498db;">New here? Create an account</a>
+            </div>
+        </div>
+
+        <div id="signup-panel" class="panel hidden">
+            <h3>Create an Account</h3>
+            <input type="text" id="signup-username" placeholder="Username" autocomplete="username" maxlength="50">
+            <input type="email" id="signup-email" placeholder="you@example.com" autocomplete="email" maxlength="100">
+            <input type="password" id="signup-password" placeholder="Password" autocomplete="new-password" maxlength="72">
+            <button onclick="handleSignup()">Sign Up</button>
+            <div style="text-align: center; margin-top: 10px;">
+                <a href="#" onclick="showLogin(); return false;" style="font-size: 0.85rem; color: #3498db;">Already have an account? Sign in</a>
+            </div>
         </div>
 
         <div id="reset-request-panel" class="panel hidden">
@@ -106,6 +120,10 @@
             <div id="tor-search-results" class="hidden" style="background: white; border: 1px solid #ddd; border-radius: 4px; max-height: 220px; overflow-y: auto; margin-top: 4px;"></div>
             <hr style="margin: 18px 0;">
             <h3>GPS Upload</h3>
+            <p style="font-size: 0.8rem; color: #666; margin: 0 0 4px;">
+                Upload a <code>.gpx</code> from your walk to bag Tors automatically.
+                <a href="/gpx-help.html" target="_blank" rel="noopener" style="color: #3498db;">How do I get one from Strava?</a>
+            </p>
             <input type="file" id="gpx-file" accept=".gpx">
             <button onclick="uploadGPX()">Analyze Hike</button>
             <div id="gpx-spinner" class="loader hidden"></div>
@@ -212,8 +230,60 @@
                     localStorage.setItem('tor_token', data.access_token);
                     localStorage.setItem('is_admin', data.is_admin);
                     checkAuth();
-                } else { showStatus("Login Failed", true); }
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    showStatus(rateLimitMessage(res, data) || "Login Failed", true);
+                }
             } catch (e) { showStatus("Connection Error", true); }
+        }
+
+        // slowapi answers a throttled request with 429 and {"error": "..."},
+        // unlike FastAPI's usual {"detail": "..."}. Returns null if not throttled.
+        function rateLimitMessage(res, data) {
+            if (res.status !== 429) return null;
+            const detail = (data && (data.error || data.detail)) || "";
+            return detail
+                ? `Too many attempts — ${detail}. Try again later.`
+                : "Too many attempts. Try again later.";
+        }
+
+        async function handleSignup() {
+            const username = document.getElementById('signup-username').value.trim();
+            const email = document.getElementById('signup-email').value.trim();
+            const password = document.getElementById('signup-password').value;
+            if (!username || !email || !password) {
+                showStatus("Username, email and password are all required", true);
+                return;
+            }
+            if (password.length > 72) {
+                showStatus("Password must be 72 characters or fewer", true);
+                return;
+            }
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, email, password })
+                });
+                const data = await res.json().catch(() => ({}));
+                const throttled = rateLimitMessage(res, data);
+                if (throttled) { showStatus(throttled, true); return; }
+                if (!res.ok) {
+                    // 400s carry a plain string; a 422 from validation carries an
+                    // array of objects, which must not be dumped into the status box.
+                    const why = typeof data.detail === 'string' ? data.detail : "Check your details and try again";
+                    showStatus(`Sign up failed — ${why}`, true);
+                    return;
+                }
+                // Log straight in so they land on the map rather than a second form.
+                document.getElementById('username').value = username;
+                document.getElementById('password').value = password;
+                document.getElementById('signup-password').value = '';
+                showLogin();
+                await handleLogin();
+            } catch (e) {
+                showStatus("Connection error", true);
+            }
         }
 
         function handleLogout() {
@@ -230,6 +300,7 @@
             const resetToken = new URLSearchParams(location.search).get('reset_token');
             if (resetToken && !token) {
                 document.getElementById('login-panel').classList.add('hidden');
+                document.getElementById('signup-panel').classList.add('hidden');
                 document.getElementById('reset-confirm-panel').classList.remove('hidden');
                 loadMapData();
                 return;
@@ -237,6 +308,7 @@
 
             if (token) {
                 document.getElementById('login-panel').classList.add('hidden');
+                document.getElementById('signup-panel').classList.add('hidden');
                 document.getElementById('reset-request-panel').classList.add('hidden');
                 document.getElementById('reset-confirm-panel').classList.add('hidden');
                 document.getElementById('nav-menu').classList.remove('hidden');
@@ -252,12 +324,20 @@
 
         function showResetRequest() {
             document.getElementById('login-panel').classList.add('hidden');
+            document.getElementById('signup-panel').classList.add('hidden');
             document.getElementById('reset-request-panel').classList.remove('hidden');
+        }
+
+        function showSignup() {
+            document.getElementById('login-panel').classList.add('hidden');
+            document.getElementById('reset-request-panel').classList.add('hidden');
+            document.getElementById('signup-panel').classList.remove('hidden');
         }
 
         function showLogin() {
             document.getElementById('reset-request-panel').classList.add('hidden');
             document.getElementById('reset-confirm-panel').classList.add('hidden');
+            document.getElementById('signup-panel').classList.add('hidden');
             document.getElementById('login-panel').classList.remove('hidden');
         }
 
@@ -270,7 +350,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email })
                 });
-                const data = await res.json();
+                const data = await res.json().catch(() => ({}));
+                const throttled = rateLimitMessage(res, data);
+                if (throttled) { showStatus(throttled, true); return; }
                 showStatus(data.message || "Check your inbox.");
             } catch (e) {
                 showStatus("Connection error", true);
@@ -287,7 +369,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ token, new_password: newPassword })
                 });
-                const data = await res.json();
+                const data = await res.json().catch(() => ({}));
+                const throttled = rateLimitMessage(res, data);
+                if (throttled) { showStatus(throttled, true); return; }
                 if (!res.ok) { showStatus(data.detail || "Reset failed", true); return; }
                 // Strip the token from the URL and return to login.
                 history.replaceState({}, '', location.pathname);

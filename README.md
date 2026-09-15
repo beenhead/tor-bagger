@@ -7,7 +7,7 @@ This project allows hikers to track their progress across the moor. It features 
 ## ✨ Features
 
 *   **Interactive Web Map:** A Leaflet.js powered frontend visualizing all Dartmoor Tors. Pins are color-coded by user-specific bagged / un-bagged state.
-*   **GPX Route Processing:** Upload a `.gpx` file from Strava, Garmin, or OS Maps. The engine scans the route, automatically bags any Tors you passed within 150 meters of, and dates each bag from the GPX point's own timestamp.
+*   **GPX Route Processing:** Upload a `.gpx` file from Strava, Garmin, or OS Maps. The engine scans the route, automatically bags any Tors you passed within 150 meters of, and dates each bag from the GPX point's own timestamp. `gpx-help.html`, linked from the upload box, walks users through exporting one from Strava.
 *   **Near Miss Detection:** Agonizingly close? The app detects if you walked within 500 meters of a Tor but missed the summit, logging it as a "Near Miss."
 *   **Mobile App (lean v1):** Flutter app for iOS and Android — login, live map, GPS-based live bagging.
 *   **Secure Authentication:** Full user registration and login system protected by bcrypt password hashing and JWT (JSON Web Tokens).
@@ -39,7 +39,7 @@ This project allows hikers to track their progress across the moor. It features 
 
 ```
 tor-bagger-backend/   FastAPI app, SQLAlchemy models, scraper, .env, virtualenv
-tor-bagger-web/       Static index.html — open directly in a browser
+tor-bagger-web/       Static frontend — index.html plus gpx-help.html, served by nginx
 tor-bagger-mobile/    Flutter project targeting iOS and Android
 ```
 
@@ -85,8 +85,11 @@ docker compose exec backend python scraper.py
 
 ### Creating users
 
-There is no signup form in the web UI yet — accounts are created through the
-API:
+Signup is open: the login panel has a **New here? Create an account** link, and
+a successful signup logs you straight in. Anyone who reaches the site can
+register, so inviting friends is just sending them the URL.
+
+Accounts can still be created through the API directly:
 
 ```bash
 curl -X POST https://torbagger.beanhead.co.uk/api/register \
@@ -120,6 +123,27 @@ Set `WEB_PORT=5500` in `.env` for local use; the site is then on
 Frontend edits are baked into the web image — rerun with `--build` to pick them
 up. Database contents live in the `db_data` volume and survive
 `docker compose down`; `docker compose down -v` wipes them.
+
+### Rate limits
+
+Because registration is public, the endpoints anyone can hit unauthenticated
+are throttled per client IP. Defaults, overridable in `.env`:
+
+| Variable | Default | Applies to |
+| --- | --- | --- |
+| `REGISTER_RATE_LIMIT` | `5/hour` | `POST /register` |
+| `LOGIN_RATE_LIMIT` | `10/minute` | `POST /token` |
+| `PASSWORD_RESET_RATE_LIMIT` | `5/hour` | both `/password-reset/*` endpoints |
+
+A throttled request gets `429` and `{"error": "Rate limit exceeded: ..."}`; the
+web UI surfaces that as a "too many attempts" message.
+
+The client IP comes from `CF-Connecting-IP`, which Cloudflare always overwrites,
+falling back to the leftmost `X-Forwarded-For` entry and then to the socket
+address. Without that, every visitor would share one bucket keyed on the nginx
+container's IP. Counters live in the backend process's memory, which is correct
+for the single uvicorn worker the Dockerfile runs — they reset when the
+container restarts, and adding workers would give each its own set.
 
 ### Ingress and TLS
 
@@ -208,6 +232,11 @@ WEB_BASE_URL=http://localhost:5500
 # Comma-separated origins allowed to call the API cross-origin. Empty means
 # none, which is correct when the frontend is proxied same-origin.
 CORS_ORIGINS=*
+
+# Per-IP rate limits on the public endpoints. Optional — these are the defaults.
+REGISTER_RATE_LIMIT=5/hour
+LOGIN_RATE_LIMIT=10/minute
+PASSWORD_RESET_RATE_LIMIT=5/hour
 ```
 
 `SECRET_KEY` signs JWTs *and* the signed logbook exports — keep it stable so existing exports remain importable. `WEB_BASE_URL` is where password-reset links point; serve the web frontend with `python -m http.server 5500` from `tor-bagger-web/` so the link in the email actually opens something. To enable real email sending in production, sign up at [resend.com](https://resend.com) and paste the API key.

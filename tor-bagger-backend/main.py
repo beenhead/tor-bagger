@@ -1,6 +1,9 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -41,6 +44,39 @@ if CORS_ORIGINS:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+# --- RATE LIMITING ---
+# The signup form is public, so /register, /token and the password-reset
+# endpoints are all reachable by anyone who finds the site. These limits are
+# per client IP, held in memory — fine for a single uvicorn worker, which is
+# what the Dockerfile runs. Add more workers and each gets its own counters.
+REGISTER_RATE_LIMIT = os.getenv("REGISTER_RATE_LIMIT", "5/hour")
+LOGIN_RATE_LIMIT = os.getenv("LOGIN_RATE_LIMIT", "10/minute")
+PASSWORD_RESET_RATE_LIMIT = os.getenv("PASSWORD_RESET_RATE_LIMIT", "5/hour")
+
+
+def get_client_ip(request: Request) -> str:
+    """The real visitor's IP, not nginx's.
+
+    Requests arrive via Cloudflare Tunnel -> nginx -> here, so request.client
+    is always the nginx container and would put every visitor in one shared
+    bucket. Cloudflare sets CF-Connecting-IP and always overwrites it, so it is
+    the one to trust; X-Forwarded-For is the fallback, with the original client
+    leftmost. Neither is spoofable here because the origin has no inbound ports
+    and is only reachable through the tunnel.
+    """
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=get_client_ip)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # --- JWT CONFIGURATION ---
 # This will now safely grab the key from your .env file!
@@ -155,7 +191,8 @@ def read_root():
     return {"status": "Tor Bagger API is secured!"}
 
 @app.post("/register")
-def register_user(user: UserCreate, db: Session = Depends(get_db)):
+@limiter.limit(REGISTER_RATE_LIMIT)
+def register_user(request: Request, user: UserCreate, db: Session = Depends(get_db)):
     if db.query(models.User).filter(models.User.email == user.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     if db.query(models.User).filter(models.User.username == user.username).first():
@@ -169,7 +206,8 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
     return {"message": "User created successfully!", "user_id": db_user.id, "username": db_user.username}
 
 @app.post("/token", response_model=Token)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+@limiter.limit(LOGIN_RATE_LIMIT)
+def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     """This is the login endpoint!"""
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
@@ -441,7 +479,8 @@ def _send_password_reset_email(to_email: str, token: str):
     resp.raise_for_status()
 
 @app.post("/password-reset/request")
-def request_password_reset(req: PasswordResetRequest, db: Session = Depends(get_db)):
+@limiter.limit(PASSWORD_RESET_RATE_LIMIT)
+def request_password_reset(request: Request, req: PasswordResetRequest, db: Session = Depends(get_db)):
     # Always return the same response — don't reveal whether the email is registered.
     user = db.query(models.User).filter(models.User.email == req.email).first()
     if user:
@@ -466,7 +505,8 @@ def request_password_reset(req: PasswordResetRequest, db: Session = Depends(get_
     return {"message": "If an account exists for that email, a reset link has been sent."}
 
 @app.post("/password-reset/confirm")
-def confirm_password_reset(req: PasswordResetConfirm, db: Session = Depends(get_db)):
+@limiter.limit(PASSWORD_RESET_RATE_LIMIT)
+def confirm_password_reset(request: Request, req: PasswordResetConfirm, db: Session = Depends(get_db)):
     row = db.query(models.PasswordResetToken).filter_by(token_hash=_hash_token(req.token)).first()
     if not row or row.used_at is not None or row.expires_at < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Invalid or expired reset link.")
