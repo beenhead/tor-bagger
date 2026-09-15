@@ -66,6 +66,7 @@
 
     <div id="sidebar">
         <h1>⛰️ Tor Bagger</h1>
+        <div id="tor-total-line" style="font-size: 0.8rem; color: #777; margin: -4px 0 14px;">Loading Tors…</div>
         <button id="main-logout-btn" class="btn-logout hidden" onclick="handleLogout()">Logout</button>
         <div id="nav-menu" class="nav-tabs hidden">
             <button class="nav-btn active" onclick="switchTab('map-panel')">Map</button>
@@ -389,6 +390,9 @@
             markersByTorId.clear();
             const torsRes = await fetch('/api/tors');
             const torsData = await torsRes.json();
+            const totalTors = torsData.tors.length;
+            document.getElementById('tor-total-line').innerText =
+                `${totalTors} ${totalTors === 1 ? 'Tor' : 'Tors'} mapped on Dartmoor`;
             let baggedIds = [];
             if (localStorage.getItem('tor_token')) {
                 const res = await fetch('/api/my-bagged-tors', {
@@ -397,7 +401,7 @@
                 if (res.ok) {
                     const d = await res.json();
                     baggedIds = (d.logs || []).map(l => l.tor_id);
-                    updateDashboard(d.logs || [], torsData.tors.length);
+                    updateDashboard(d.logs || [], totalTors);
                 }
             }
             torsData.tors.forEach(tor => {
@@ -481,6 +485,8 @@
         function updateDashboard(logs, totalTors) {
             const count = logs.length;
             document.getElementById('dash-bagged-count').innerText = count;
+            document.getElementById('dash-total-tors').innerText =
+                totalTors > 0 ? `Tors Bagged of ${totalTors}` : 'Tors Bagged';
             const pct = totalTors > 0 ? (count / totalTors) * 100 : 0;
             document.getElementById('dash-progress-fill').style.width = `${pct}%`;
 
