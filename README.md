@@ -167,7 +167,9 @@ CREATE DATABASE tor_bagger CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE tor_bagger;
 ```
 
-Then set `DATABASE_URL` in `tor-bagger-backend/.env` (see the next section). If left unset, the app falls back to a local MySQL connection string baked into `database.py`.
+Then set `DATABASE_URL` in `tor-bagger-backend/.env` (see the next section). If left unset, the app builds a Postgres URL from the `POSTGRES_*` variables instead — that is the path the Docker stack uses, and it percent-encodes the password for you.
+
+> If you do set `DATABASE_URL` by hand and the password contains `@`, `:`, `/` or `#`, percent-encode it (`@` becomes `%40`). An unencoded `@` makes the rest of the password parse as the hostname, and the backend fails to start.
 
 ### 2. Backend
 
@@ -183,10 +185,19 @@ Create a `.env` file in `tor-bagger-backend/` containing:
 ```
 SECRET_KEY=replace-me-with-a-long-random-string
 
-# Database — pick one. If omitted, falls back to local MySQL.
+# Database — pick one. Percent-encode special characters in the password
+# (@ -> %40, : -> %3A, / -> %2F), or leave DATABASE_URL empty and set the
+# POSTGRES_* vars below instead, which handles the encoding for you.
 # MySQL:    DATABASE_URL=mysql+pymysql://tor_bagger:aBcDeFgH@localhost:3306/tor_bagger
 # Postgres: DATABASE_URL=postgresql://tor_bagger:aBcDeFgH@localhost:5432/tor_bagger
 DATABASE_URL=
+
+# Used only when DATABASE_URL is empty:
+POSTGRES_USER=tor_bagger
+POSTGRES_PASSWORD=
+POSTGRES_DB=tor_bagger
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
 
 # Password reset emails (optional in dev — without RESEND_API_KEY, the reset
 # link is just printed to the uvicorn console instead of emailed).
