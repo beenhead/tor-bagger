@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import base64
 import json
+import gzip
 import requests as http_requests
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -277,6 +278,13 @@ def bag_a_tor(tor_id: int, request: BagRequest, current_user: models.User = Depe
 @app.post("/upload-gpx")
 async def upload_gpx(file: UploadFile = File(...), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     contents = await file.read()
+    # Strava's bulk export ships some tracks gzipped (.gpx.gz). Sniff the gzip
+    # magic bytes rather than trusting the filename, so either form works.
+    if contents[:2] == b"\x1f\x8b":
+        try:
+            contents = gzip.decompress(contents)
+        except OSError:
+            raise HTTPException(status_code=400, detail="Could not decompress that .gz file.")
     try:
         gpx = gpxpy.parse(contents)
     except Exception as e:

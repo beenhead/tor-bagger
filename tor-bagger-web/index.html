@@ -125,10 +125,27 @@
                 Upload a <code>.gpx</code> from your walk to bag Tors automatically.
                 <a href="/gpx-help.html" target="_blank" rel="noopener" style="color: #3498db;">How do I get one from Strava?</a>
             </p>
-            <input type="file" id="gpx-file" accept=".gpx">
+            <input type="file" id="gpx-file" accept=".gpx,.gz">
             <button onclick="uploadGPX()">Analyze Hike</button>
             <div id="gpx-spinner" class="loader hidden"></div>
             <div id="gpx-result" class="hidden" style="margin-top: 12px; padding: 10px; border-radius: 6px; font-size: 0.85rem;"></div>
+
+            <hr style="margin: 18px 0;">
+            <h3>Strava Bulk Import</h3>
+            <p style="font-size: 0.8rem; color: #666; margin: 0 0 4px;">
+                Drop in the whole-history <code>.zip</code> Strava emails you — walks, hikes and runs
+                are found and processed automatically.
+                <a href="/gpx-help.html#bulk" target="_blank" rel="noopener" style="color: #3498db;">How do I get one?</a>
+            </p>
+            <input type="file" id="strava-zip" accept=".zip,application/zip">
+            <button onclick="importStravaArchive()">Import Archive</button>
+            <div id="zip-progress" class="hidden" style="margin-top: 12px;">
+                <div class="progress-bar-bg"><div class="progress-bar-fill" id="zip-progress-fill"></div></div>
+                <div id="zip-progress-text" style="font-size: 0.8rem; color: #666; margin-top: 6px;"></div>
+            </div>
+            <div id="zip-result" class="hidden" style="margin-top: 12px; padding: 10px; border-radius: 6px; font-size: 0.85rem;"></div>
+
+            <hr style="margin: 18px 0;">
             <button class="btn-admin" onclick="openNewTorForm()">➕ Add Missing Tor</button>
         </div>
 
@@ -191,6 +208,10 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Reads the Strava export zip in the browser. BlobReader seeks within the
+         file rather than loading it, which matters: these archives run to
+         hundreds of MB, most of it photos we never touch. -->
+    <script src="https://unpkg.com/@zip.js/zip.js@2.7.62/dist/zip.min.js"></script>
     <script>
         const map = L.map('map').setView([50.5719, -3.9811], 11);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
@@ -381,6 +402,199 @@
                 showStatus(data.message || "Password updated. Sign in with your new password.");
             } catch (e) {
                 showStatus("Connection error", true);
+            }
+        }
+
+        // --- Strava bulk export import ---
+
+        // Strava records the activity type only in activities.csv, so that is
+        // what decides which tracks are worth uploading. Everything else in the
+        // archive — rides, photos, the .fit files — is left alone.
+        const FOOT_ACTIVITY_TYPES = ['walk', 'hike', 'run', 'trail run', 'snowshoe'];
+
+        // activities.csv has quoted fields containing commas AND newlines
+        // (activity descriptions), so it needs a real parse, not a split.
+        function parseCsv(text) {
+            if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+            const rows = [];
+            let row = [], field = '', inQuotes = false;
+            for (let i = 0; i < text.length; i++) {
+                const c = text[i];
+                if (inQuotes) {
+                    if (c === '"') {
+                        if (text[i + 1] === '"') { field += '"'; i++; }
+                        else inQuotes = false;
+                    } else field += c;
+                } else if (c === '"') inQuotes = true;
+                else if (c === ',') { row.push(field); field = ''; }
+                else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+                else if (c !== '\r') field += c;
+            }
+            if (field.length || row.length) { row.push(field); rows.push(row); }
+            return rows;
+        }
+
+        // Some older Strava activities (recorded on the phone app) are exported as
+        // raw JSON rather than GPX. The track is in there, so convert it to a
+        // minimal GPX and let the rest of the pipeline treat it like any other.
+        function stravaJsonToGpx(text) {
+            let doc;
+            try { doc = JSON.parse(text); } catch (e) { return null; }
+            const block = (doc.data || []).find(b => (b.fields || []).includes('latlng'));
+            if (!block || !block.values) return null;
+
+            const iLatLng = block.fields.indexOf('latlng');
+            const iTime = block.fields.indexOf('time');
+            const iEle = block.fields.indexOf('elevation');
+            const startMs = Date.parse((doc.metadata || {}).start_date) || 0;
+
+            const out = ['<?xml version="1.0" encoding="UTF-8"?>',
+                '<gpx version="1.1" creator="Tor Bagger" xmlns="http://www.topografix.com/GPX/1/1">',
+                '<trk><trkseg>'];
+            for (const row of block.values) {
+                const ll = row[iLatLng];
+                if (!ll || ll.length < 2) continue;
+                let pt = `<trkpt lat="${ll[0]}" lon="${ll[1]}">`;
+                if (iEle !== -1 && typeof row[iEle] === 'number') pt += `<ele>${row[iEle]}</ele>`;
+                if (iTime !== -1 && typeof row[iTime] === 'number') {
+                    // Some exports store a unix timestamp, others seconds since
+                    // the activity started; anything small is an offset.
+                    const ms = row[iTime] > 1e9 ? row[iTime] * 1000 : startMs + row[iTime] * 1000;
+                    if (ms) pt += `<time>${new Date(ms).toISOString()}</time>`;
+                }
+                out.push(pt + '</trkpt>');
+            }
+            out.push('</trkseg></trk></gpx>');
+            // Three lines of scaffolding and no points is not a track.
+            return out.length > 4 ? out.join('\n') : null;
+        }
+
+        async function readMaybeGzipText(bytes) {
+            if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+                if (typeof DecompressionStream === 'undefined') return null;
+                const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+                bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+            }
+            return new TextDecoder().decode(bytes);
+        }
+
+        function zipProgress(done, total, label) {
+            document.getElementById('zip-progress').classList.remove('hidden');
+            document.getElementById('zip-progress-fill').style.width =
+                `${total ? (done / total) * 100 : 0}%`;
+            document.getElementById('zip-progress-text').innerText = label;
+        }
+
+        function zipResult(html, isError = false) {
+            const box = document.getElementById('zip-result');
+            box.classList.remove('hidden');
+            box.style.background = isError ? '#f8d7da' : '#d4edda';
+            box.style.color = isError ? '#721c24' : '#155724';
+            box.innerHTML = html;
+        }
+
+        async function importStravaArchive() {
+            const file = document.getElementById('strava-zip').files[0];
+            if (!file) { showStatus("Pick your Strava export .zip first", true); return; }
+            const token = localStorage.getItem('tor_token');
+            if (!token) { showStatus("Log in first", true); return; }
+
+            if (typeof zip === 'undefined') {
+                // The unzip library comes from a CDN; without it there is no
+                // way to read the archive, and the raw ReferenceError is no help.
+                zipResult("The unzip library didn't load — check your connection and reload the page.", true);
+                return;
+            }
+
+            document.getElementById('zip-result').classList.add('hidden');
+            zipProgress(0, 1, "Opening archive…");
+
+            let reader;
+            try {
+                reader = new zip.ZipReader(new zip.BlobReader(file));
+                const entries = await reader.getEntries();
+
+                const csvEntry = entries.find(e => e.filename.replace(/^.*\//, '') === 'activities.csv');
+                if (!csvEntry) {
+                    zipResult("No <code>activities.csv</code> in that zip — is it definitely a Strava export?", true);
+                    return;
+                }
+
+                const rows = parseCsv(await csvEntry.getData(new zip.TextWriter()));
+                const header = rows.shift() || [];
+                const typeCol = header.indexOf('Activity Type');
+                const fileCol = header.indexOf('Filename');
+                if (typeCol === -1 || fileCol === -1) {
+                    zipResult("Couldn't read the columns in <code>activities.csv</code>.", true);
+                    return;
+                }
+
+                // Entries are matched on the path activities.csv records.
+                const byName = new Map(entries.map(e => [e.filename, e]));
+                const wanted = rows
+                    .filter(r => r[fileCol] && FOOT_ACTIVITY_TYPES.includes((r[typeCol] || '').toLowerCase()))
+                    .map(r => ({ path: r[fileCol].replace(/\\/g, '/') }));
+
+                if (!wanted.length) {
+                    zipResult("No walks, hikes or runs found in that archive — nothing to import.", true);
+                    return;
+                }
+
+                const bagged = new Set();
+                let processed = 0, failed = 0, missing = 0, nearMisses = 0;
+
+                for (const act of wanted) {
+                    const entry = byName.get(act.path);
+                    processed++;
+                    zipProgress(processed, wanted.length,
+                        `Processing ${processed} of ${wanted.length}… ${bagged.size} new Tor${bagged.size === 1 ? '' : 's'} so far`);
+                    if (!entry) { missing++; continue; }
+
+                    try {
+                        // Uploaded byte-for-byte: the backend sniffs gzip itself,
+                        // so .gpx.gz entries need no work here.
+                        let bytes = await entry.getData(new zip.Uint8ArrayWriter());
+                        let uploadName = act.path.replace(/^.*\//, '');
+                        if (/\.json(\.gz)?$/i.test(act.path)) {
+                            const gpx = stravaJsonToGpx(await readMaybeGzipText(bytes) || '');
+                            if (!gpx) { failed++; continue; }
+                            bytes = new TextEncoder().encode(gpx);
+                            uploadName = uploadName.replace(/\.json(\.gz)?$/i, '.gpx');
+                        }
+                        const form = new FormData();
+                        form.append('file', new Blob([bytes]), uploadName);
+                        const res = await fetch('/api/upload-gpx', {
+                            method: 'POST',
+                            headers: { 'Authorization': `Bearer ${token}` },
+                            body: form
+                        });
+                        if (!res.ok) { failed++; continue; }
+                        const data = await res.json();
+                        (data.tors_bagged_on_this_walk || []).forEach(n => bagged.add(n));
+                        nearMisses += (data.near_misses || []).length;
+                    } catch (e) {
+                        failed++;
+                    }
+                }
+
+                const notes = [];
+                if (nearMisses) notes.push(`${nearMisses} near miss${nearMisses === 1 ? '' : 'es'} along the way`);
+                if (missing) notes.push(`${missing} listed track${missing === 1 ? '' : 's'} missing from the zip`);
+                if (failed) notes.push(`${failed} file${failed === 1 ? '' : 's'} couldn't be read`);
+
+                zipResult(
+                    `<strong>Processed ${wanted.length} walk${wanted.length === 1 ? '' : 's'}.</strong><br>` +
+                    (bagged.size
+                        ? `Bagged ${bagged.size} new Tor${bagged.size === 1 ? '' : 's'}: ${[...bagged].join(', ')}`
+                        : "No new Tors — you'd already bagged everything on those routes.") +
+                    (notes.length ? `<br><span style="color:#666;">${notes.join('. ')}.</span>` : '')
+                );
+                zipProgress(wanted.length, wanted.length, "Done.");
+                loadMapData();
+            } catch (e) {
+                zipResult(`Couldn't read that archive: ${e.message}`, true);
+            } finally {
+                if (reader) { try { await reader.close(); } catch (e) {} }
             }
         }
 
