@@ -206,7 +206,7 @@
             formData.append('username', document.getElementById('username').value);
             formData.append('password', document.getElementById('password').value);
             try {
-                const res = await fetch('http://127.0.0.1:8000/token', { method: 'POST', body: formData });
+                const res = await fetch('/api/token', { method: 'POST', body: formData });
                 if (res.ok) {
                     const data = await res.json();
                     localStorage.setItem('tor_token', data.access_token);
@@ -265,7 +265,7 @@
             const email = document.getElementById('reset-email').value.trim();
             if (!email) { showStatus("Email is required", true); return; }
             try {
-                const res = await fetch('http://127.0.0.1:8000/password-reset/request', {
+                const res = await fetch('/api/password-reset/request', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email })
@@ -282,7 +282,7 @@
             const newPassword = document.getElementById('reset-new-password').value;
             if (!newPassword) { showStatus("Enter a new password", true); return; }
             try {
-                const res = await fetch('http://127.0.0.1:8000/password-reset/confirm', {
+                const res = await fetch('/api/password-reset/confirm', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ token, new_password: newPassword })
@@ -303,11 +303,11 @@
             markers.clearLayers();
             torsById.clear();
             markersByTorId.clear();
-            const torsRes = await fetch('http://127.0.0.1:8000/tors');
+            const torsRes = await fetch('/api/tors');
             const torsData = await torsRes.json();
             let baggedIds = [];
             if (localStorage.getItem('tor_token')) {
-                const res = await fetch('http://127.0.0.1:8000/my-bagged-tors', {
+                const res = await fetch('/api/my-bagged-tors', {
                     headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
                 });
                 if (res.ok) {
@@ -414,13 +414,13 @@
         }
 
         async function fetchReviews(id) {
-            const res = await fetch(`http://127.0.0.1:8000/tors/${id}/reviews`);
+            const res = await fetch(`/api/tors/${id}/reviews`);
             const revs = await res.json();
             document.getElementById(`revs-${id}`).innerHTML = revs.length ? revs.map(r => `<div>${"⭐".repeat(r.rating)}: ${r.comment}</div>`).join('') : "No reviews.";
         }
 
         async function submitReview(id) {
-            await fetch(`http://127.0.0.1:8000/tors/${id}/reviews`, {
+            await fetch(`/api/tors/${id}/reviews`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ rating: 5, comment: document.getElementById(`c-${id}`).value })
@@ -456,7 +456,7 @@
             formData.append('file', fileInput.files[0]);
 
             try {
-                const response = await fetch('http://127.0.0.1:8000/upload-gpx', {
+                const response = await fetch('/api/upload-gpx', {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` },
                     body: formData
@@ -516,7 +516,7 @@
             if (Number.isNaN(elev)) { showStatus("Elevation must be a number", true); return; }
 
             try {
-                const res = await fetch('http://127.0.0.1:8000/tors/suggest', {
+                const res = await fetch('/api/tors/suggest', {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -571,7 +571,7 @@
         }
 
         async function loadSuggestions() {
-            const res = await fetch('http://127.0.0.1:8000/admin/suggestions', {
+            const res = await fetch('/api/admin/suggestions', {
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
             });
             const data = await res.json();
@@ -612,7 +612,7 @@
                 tor_id: torid
             };
 
-            await fetch(`http://127.0.0.1:8000/admin/approve/${sid}`, {
+            await fetch(`/api/admin/approve/${sid}`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${localStorage.getItem('tor_token')}`,
@@ -626,7 +626,7 @@
 
         async function rejectS(sid) {
             if (!confirm("Reject this suggestion?")) return;
-            const res = await fetch(`http://127.0.0.1:8000/admin/reject/${sid}`, {
+            const res = await fetch(`/api/admin/reject/${sid}`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
             });
@@ -641,7 +641,7 @@
 
         async function exportLogbook() {
             try {
-                const res = await fetch('http://127.0.0.1:8000/my-bagged-tors/export', {
+                const res = await fetch('/api/my-bagged-tors/export', {
                     headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
                 });
                 if (!res.ok) { showStatus("Export failed", true); return; }
@@ -671,7 +671,7 @@
             const formData = new FormData();
             formData.append('file', file);
             try {
-                const res = await fetch('http://127.0.0.1:8000/my-bagged-tors/import', {
+                const res = await fetch('/api/my-bagged-tors/import', {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` },
                     body: formData
@@ -694,7 +694,7 @@
         }
 
         async function loadLeaderboard() {
-            const res = await fetch('http://127.0.0.1:8000/leaderboard');
+            const res = await fetch('/api/leaderboard');
             const data = await res.json();
             document.getElementById('leaderboard-body').innerHTML = data.map(r => `<tr><td>${r.rank}</td><td>${r.username}</td><td>${r.total_bagged}</td></tr>`).join('');
         }

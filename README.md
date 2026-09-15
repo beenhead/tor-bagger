@@ -43,46 +43,66 @@ tor-bagger-web/       Static index.html — open directly in a browser
 tor-bagger-mobile/    Flutter project targeting iOS and Android
 ```
 
-## 🐳 Running with Docker (quickest route)
+## 🐳 Running with Docker
 
 `docker-compose.yml` brings up three containers: Postgres, the FastAPI backend,
-and an nginx container serving the static web frontend. No local Python, MySQL,
-or Postgres install needed.
+and nginx serving the static frontend *and* proxying `/api/` through to the
+backend. Because the API is same-origin, the frontend uses relative URLs and
+nothing needs to know the public hostname.
 
-You still need `tor-bagger-backend/.env` for `SECRET_KEY` (and optionally
-`RESEND_API_KEY`). `DATABASE_URL` is set by Compose and points at the `db`
-container, so whatever is in `.env` for local runs is ignored inside Docker.
+The compose file is production-shaped by default: only the web port is
+published, the database and backend are reachable only on the internal network,
+and secrets come from a `.env` file.
+
+### Configure
 
 ```bash
-docker compose up --build        # or: docker-compose up --build
+cp .env.example .env
 ```
 
-*   Web frontend → http://localhost:5500
-*   API + Swagger docs → http://localhost:8000/docs
-*   Postgres → `localhost:5432` (user/pass/db all `tor_bagger`)
+Fill in at minimum `SECRET_KEY`, `POSTGRES_PASSWORD`, and `WEB_BASE_URL`
+(generate secrets with `openssl rand -hex 32`). Compose refuses to start with
+a clear error if any of the three is missing.
 
-Tables are created automatically on first boot. Seed the master tor data once
-the stack is up:
+`SECRET_KEY` signs JWTs *and* logbook exports — keep it stable once set, or
+previously generated exports stop validating.
+
+### Production
+
+```bash
+docker compose up -d --build
+```
+
+Serves on `WEB_PORT` (default 80). Seed the master tor data once the stack is
+up — note this needs an admin user to exist first, see below:
 
 ```bash
 docker compose exec backend python scraper.py
 ```
 
-The backend mounts `tor-bagger-backend/` into the container and runs uvicorn
-with `--reload`, so Python edits take effect immediately. Edits to
-`tor-bagger-web/index.html` are baked into the image — rerun
-`docker compose up --build web` to pick them up.
-
-Database contents live in the `db_data` volume and survive `docker compose
-down`. To wipe and start fresh:
+### Local development
 
 ```bash
-docker compose down -v
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
-The frontend calls the API at `http://127.0.0.1:8000` from the browser (i.e.
-from your host), which is why the backend port is published rather than kept
-internal to the Compose network.
+The dev overlay adds uvicorn `--reload` with the backend source bind-mounted,
+publishes Postgres on 5432 and the backend on 8000, and sets `CORS_ORIGINS=*`
+so the mobile app can call the API directly. Set `WEB_PORT=5500` in `.env` for
+local use. The overlay is deliberately *not* named
+`docker-compose.override.yml`, so it can never load by accident on a server.
+
+Frontend edits are baked into the web image — rerun with `--build` to pick them
+up. Database contents live in the `db_data` volume and survive
+`docker compose down`; `docker compose down -v` wipes them.
+
+### Notes
+
+*   TLS is not handled here. For a public deployment put a reverse proxy
+    (Caddy, or nginx with certbot) in front, or terminate at a load balancer —
+    JWTs over plain HTTP are readable in transit.
+*   `CORS_ORIGINS` should stay empty in production. The frontend is same-origin,
+    so it needs no entry; native mobile apps do not enforce CORS.
 
 ## 🚀 Getting Started
 
@@ -131,6 +151,10 @@ DATABASE_URL=
 RESEND_API_KEY=
 RESEND_FROM=Tor Bagger <onboarding@resend.dev>
 WEB_BASE_URL=http://localhost:5500
+
+# Comma-separated origins allowed to call the API cross-origin. Empty means
+# none, which is correct when the frontend is proxied same-origin.
+CORS_ORIGINS=*
 ```
 
 `SECRET_KEY` signs JWTs *and* the signed logbook exports — keep it stable so existing exports remain importable. `WEB_BASE_URL` is where password-reset links point; serve the web frontend with `python -m http.server 5500` from `tor-bagger-web/` so the link in the email actually opens something. To enable real email sending in production, sign up at [resend.com](https://resend.com) and paste the API key.
@@ -153,7 +177,13 @@ uvicorn main:app --reload --host 0.0.0.0
 
 ### 3. Web Frontend
 
-Open `tor-bagger-web/index.html` directly in your browser. It expects the API at `http://127.0.0.1:8000`.
+The frontend calls the API at relative `/api/...` URLs, which assumes something
+is proxying `/api/` to the backend. The Docker stack's nginx does this, so the
+simplest route is `docker compose` (above).
+
+Opening `index.html` straight from disk no longer works — `file://` has nothing
+to proxy through. If you want to run the frontend without Docker, put any local
+proxy in front that maps `/api/` to `http://127.0.0.1:8000/`.
 
 ### 4. Mobile App
 

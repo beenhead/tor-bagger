@@ -1,46 +1,44 @@
+# Production-shaped stack. Values come from the .env file in this directory
+# (see .env.example). For local development, layer the dev overlay on top:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: tor_bagger
-      POSTGRES_PASSWORD: tor_bagger
-      POSTGRES_DB: tor_bagger
+      POSTGRES_USER: ${POSTGRES_USER:-tor_bagger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-tor_bagger}
     volumes:
       - db_data:/var/lib/postgresql/data
-    ports:
-      # Exposed so you can poke at the DB from the host (psql, TablePlus, etc).
-      - "5432:5432"
+    # Deliberately not published — only the backend needs to reach it, over the
+    # internal compose network. Use `docker compose exec db psql` for a shell.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tor_bagger -d tor_bagger"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tor_bagger} -d ${POSTGRES_DB:-tor_bagger}"]
+      interval: 10s
       timeout: 5s
       retries: 10
 
   backend:
     build: ./tor-bagger-backend
-    env_file:
-      - ./tor-bagger-backend/.env
+    restart: unless-stopped
     environment:
-      # Set here rather than in .env so the container always talks to the
-      # compose database regardless of what .env says for local runs.
-      DATABASE_URL: postgresql://tor_bagger:tor_bagger@db:5432/tor_bagger
-      WEB_BASE_URL: http://localhost:5500
-    ports:
-      # Published on 8000 because the web frontend calls http://127.0.0.1:8000
-      # from the browser, i.e. from the host, not from inside the network.
-      - "8000:8000"
-    volumes:
-      # Live reload during development; drop this line for a frozen image.
-      - ./tor-bagger-backend:/app
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tor_bagger}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-tor_bagger}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env}
+      WEB_BASE_URL: ${WEB_BASE_URL:?WEB_BASE_URL must be set in .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM: ${RESEND_FROM:-Tor Bagger <onboarding@resend.dev>}
+    # Not published either — nginx proxies /api/ to it inside the network.
     depends_on:
       db:
         condition: service_healthy
 
   web:
     build: ./tor-bagger-web
+    restart: unless-stopped
     ports:
-      - "5500:80"
+      - "${WEB_PORT:-80}:80"
     depends_on:
       - backend
 

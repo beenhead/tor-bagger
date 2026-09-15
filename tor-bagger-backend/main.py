@@ -21,22 +21,26 @@ from datetime import datetime, timedelta
 import models
 from database import engine, get_db
 
-
+# Load variables from the .env file before anything reads the environment.
+load_dotenv()
 
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Tor Bagger API", description="MySQL & JWT Powered Backend")
+app = FastAPI(title="Tor Bagger API", description="JWT-powered backend")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], # In production, this would be your actual website URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# In production the web frontend is served same-origin behind nginx (/api/...),
+# so no CORS entry is needed for it. CORS_ORIGINS exists for anything that does
+# call the API cross-origin — a separately hosted frontend, or "*" in dev.
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 
-# Load variables from the .env file
-load_dotenv()
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # --- JWT CONFIGURATION ---
 # This will now safely grab the key from your .env file!
