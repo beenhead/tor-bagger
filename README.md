@@ -45,10 +45,10 @@ tor-bagger-mobile/    Flutter project targeting iOS and Android
 
 ## 🐳 Running with Docker
 
-`docker-compose.yml` brings up four containers: Postgres, the FastAPI backend,
-nginx serving the static frontend *and* proxying `/api/` through to the backend,
-and Caddy terminating TLS in front of the lot. Because the API is same-origin,
-the frontend uses relative URLs and nothing needs to know the public hostname.
+`docker-compose.yml` brings up three containers: Postgres, the FastAPI backend,
+and nginx serving the static frontend *and* proxying `/api/` through to the
+backend. Because the API is same-origin, the frontend uses relative URLs and
+nothing needs to know the public hostname.
 
 The compose file is production-shaped by default: only the web port is
 published, the database and backend are reachable only on the internal network,
@@ -60,14 +60,9 @@ and secrets come from a `.env` file.
 cp .env.example .env
 ```
 
-Fill in at minimum `SECRET_KEY`, `POSTGRES_PASSWORD`, `WEB_BASE_URL`, and
-`DOMAIN` (generate secrets with `openssl rand -hex 32`). Compose refuses to
-start with a clear error if any of them is missing.
-
-`DOMAIN` must be a real DNS name already pointing at the server — Caddy proves
-control of it to Let's Encrypt over ports 80 and 443, so both need to be open
-to the internet before the first start. `WEB_BASE_URL` should be the same host
-with the `https://` scheme.
+Fill in at minimum `SECRET_KEY`, `POSTGRES_PASSWORD`, and `WEB_BASE_URL`
+(generate secrets with `openssl rand -hex 32`). Compose refuses to start with
+a clear error if any of the three is missing.
 
 `SECRET_KEY` signs JWTs *and* logbook exports — keep it stable once set, or
 previously generated exports stop validating.
@@ -78,10 +73,8 @@ previously generated exports stop validating.
 docker compose up -d --build
 ```
 
-Caddy obtains a certificate on first start and redirects HTTP to HTTPS, so the
-site comes up on `https://$DOMAIN` with no further setup. Certificates renew
-automatically and live in the `caddy_data` volume — keep that volume, because
-Let's Encrypt rate-limits re-issuance.
+The web container publishes on `127.0.0.1:80` by default, i.e. loopback only.
+Nothing is exposed to the internet directly — see *Ingress and TLS* below.
 
 Seed the master tor data once the stack is up — note this needs an admin user
 to exist first, see below:
@@ -96,7 +89,7 @@ There is no signup form in the web UI yet — accounts are created through the
 API:
 
 ```bash
-curl -X POST https://$DOMAIN/api/register \
+curl -X POST https://torbagger.beanhead.co.uk/api/register \
   -H 'Content-Type: application/json' \
   -d '{"username":"you","email":"you@example.com","password":"..."}'
 ```
@@ -116,25 +109,40 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
 The dev overlay adds uvicorn `--reload` with the backend source bind-mounted,
-publishes Postgres on 5432, the backend on 8000, and nginx directly on 5500,
-and sets `CORS_ORIGINS=*` so the mobile app can call the API directly. The
-overlay is deliberately *not* named `docker-compose.override.yml`, so it can
-never load by accident on a server.
+publishes Postgres on 5432 and the backend on 8000, and sets `CORS_ORIGINS=*`
+so the mobile app can call the API directly. The overlay is deliberately *not*
+named `docker-compose.override.yml`, so it can never load by accident on a
+server.
 
-Set `DOMAIN=localhost` in `.env` for local use: Caddy then issues a certificate
-from its own internal CA rather than trying to reach Let's Encrypt, and
-`https://localhost` works (your client will not trust that CA, hence
-`curl -k`). Or bypass TLS entirely on `http://localhost:5500`.
+Set `WEB_PORT=5500` in `.env` for local use; the site is then on
+`http://localhost:5500`.
 
 Frontend edits are baked into the web image — rerun with `--build` to pick them
 up. Database contents live in the `db_data` volume and survive
 `docker compose down`; `docker compose down -v` wipes them.
 
+### Ingress and TLS
+
+The production deployment sits behind a **Cloudflare Tunnel**, which terminates
+TLS at Cloudflare's edge and connects *outbound* from the server to reach the
+site at `http://localhost:80`. That means:
+
+*   No inbound ports are open on the host, and none need to be.
+*   The origin speaks plain HTTP on loopback. That is fine — the hop is on the
+    server itself, and the public connection is HTTPS.
+*   Do **not** add a TLS terminator (Caddy, nginx with certbot) on the origin.
+    It would take port 80 from the tunnel, and ACME challenges cannot reach a
+    host with no inbound ports anyway.
+
+The tunnel's route is configured in the Cloudflare dashboard under
+*Networks → Tunnels*, pointing `torbagger.beanhead.co.uk` at
+`http://localhost:80`. `WEB_PORT` must match whatever that route says.
+
+If you ever move off the tunnel and expose the host directly, that is when a
+TLS terminator becomes necessary — set `WEB_BIND=0.0.0.0` and put one in front.
+
 ### Notes
 
-*   Caddy sends HSTS with a one-year max-age once TLS is up. Browsers will
-    then refuse plain HTTP for the domain, so don't enable it on a host you
-    intend to serve over HTTP later.
 *   `CORS_ORIGINS` should stay empty in production. The frontend is same-origin,
     so it needs no entry; native mobile apps do not enforce CORS.
 
