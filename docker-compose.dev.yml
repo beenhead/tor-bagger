@@ -18,6 +18,12 @@ services:
       # Allows a page opened outside nginx, or the mobile app pointed straight
       # at :8000, to call the API cross-origin.
       CORS_ORIGINS: "*"
+      # Effectively off locally: behind the dev nginx every request looks like
+      # it came from the nginx container, so one bucket would throttle you while
+      # you are clicking through the signup form.
+      REGISTER_RATE_LIMIT: "1000/minute"
+      LOGIN_RATE_LIMIT: "1000/minute"
+      PASSWORD_RESET_RATE_LIMIT: "1000/minute"
     volumes:
       - ./tor-bagger-backend:/app
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

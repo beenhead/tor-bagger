@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tor Bagger — Getting a GPX file out of Strava</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0 20px 60px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f4f4f9;
+            color: #2c3e50;
+            line-height: 1.6;
+        }
+        .wrap { max-width: 760px; margin: 0 auto; }
+        header { padding: 30px 0 10px; }
+        h1 { margin: 0 0 6px; font-size: 1.8rem; border-bottom: 2px solid #27ae60; padding-bottom: 12px; }
+        h2 { font-size: 1.2rem; margin: 32px 0 8px; color: #27ae60; }
+        h3 { font-size: 1rem; margin: 20px 0 4px; }
+        .back { display: inline-block; margin-top: 14px; color: #3498db; text-decoration: none; font-size: 0.9rem; font-weight: bold; }
+        .back:hover { text-decoration: underline; }
+        .card { background: white; border: 1px solid #dee2e6; border-radius: 8px; padding: 18px 22px; margin: 16px 0; }
+        ol, ul { padding-left: 22px; }
+        li { margin: 8px 0; }
+        code {
+            background: #eef1f4;
+            border: 1px solid #dde2e7;
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-size: 0.88em;
+            /* Break only words that genuinely can't fit — break-all would split
+               short tokens like .gpx across lines. */
+            overflow-wrap: break-word;
+        }
+        .note { background: #eaf6ef; border-left: 4px solid #27ae60; padding: 12px 16px; border-radius: 0 6px 6px 0; margin: 16px 0; font-size: 0.93rem; }
+        .warn { background: #fdf3e3; border-left: 4px solid #e0a53c; padding: 12px 16px; border-radius: 0 6px 6px 0; margin: 16px 0; font-size: 0.93rem; }
+        a { color: #3498db; }
+        footer { margin-top: 40px; font-size: 0.85rem; color: #7a848c; border-top: 1px solid #dee2e6; padding-top: 16px; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <header>
+        <h1>⛰️ Getting a GPX file out of Strava</h1>
+        <p style="color: #6b7680; margin: 0;">A GPX file is just the list of GPS points your watch or phone recorded on a walk.
+            Upload one to Tor Bagger and it works out which Tors you passed.</p>
+        <a class="back" href="/">← Back to the map</a>
+    </header>
+
+    <h2>One walk at a time</h2>
+    <div class="card">
+        <p><strong>You need a computer, or a phone browser set to "desktop site".</strong>
+            The Strava mobile app has no export button — this only exists on the website.</p>
+        <ol>
+            <li>Go to <a href="https://www.strava.com" target="_blank" rel="noopener">strava.com</a> and log in.</li>
+            <li>Open the activity you want. You can only export your <em>own</em> activities, not a friend's.</li>
+            <li>Find the <strong>···</strong> menu (labelled something like "More options") on the activity page —
+                usually top-right, near the edit and share buttons.</li>
+            <li>Choose <strong>Export GPX</strong>. The file downloads straight away.</li>
+            <li>Back on the Tor Bagger map, hit <strong>Choose file</strong> under GPS Upload, pick the
+                <code>.gpx</code> you just downloaded, then <strong>Analyze Hike</strong>.</li>
+        </ol>
+        <div class="note">
+            <strong>Shortcut:</strong> add <code>/export_gpx</code> to the end of an activity's web address and the
+            download starts immediately — no menus. For example:<br>
+            <code>https://www.strava.com/activities/1234567890/export_gpx</code>
+        </div>
+    </div>
+
+    <h2>If there's no "Export GPX" option</h2>
+    <div class="card">
+        <p>Activities uploaded from a Garmin, Wahoo or similar sometimes offer <strong>Export Original</strong> instead.
+            That gives you the file exactly as the device recorded it, which is often a <code>.fit</code> or
+            <code>.tcx</code> rather than a <code>.gpx</code>.</p>
+        <p>Tor Bagger only reads <code>.gpx</code>, so you'll need to convert it. Any of the free GPS file converters
+            will do it in a browser — search for "fit to gpx converter". Alternatively, if the activity also synced to
+            Garmin Connect, export it from there as GPX and skip the conversion.</p>
+    </div>
+
+    <h2>Your whole Strava history at once</h2>
+    <div class="card">
+        <p>Worth doing if you've been walking Dartmoor for years and want it all bagged in one go.</p>
+        <ol>
+            <li>On strava.com, go to <strong>Settings</strong> → <strong>My Account</strong>.</li>
+            <li>Click <strong>Download or Delete Your Account</strong>, then <strong>Get Started</strong>.</li>
+            <li>Under the "Download Request" step, click <strong>Request Your Archive</strong>.
+                Ignore the delete options further down the page.</li>
+            <li>Strava emails you a download link. It can take anywhere from a few minutes to a day or two.</li>
+            <li>Unzip it and look in the <code>activities</code> folder. Upload the <code>.gpx</code> files to Tor Bagger
+                one at a time.</li>
+        </ol>
+        <div class="warn">
+            The archive contains files in whatever format each activity was originally recorded in, so expect a mix of
+            <code>.gpx</code>, <code>.fit</code> and <code>.tcx</code> — and many will be gzipped
+            (<code>.gpx.gz</code>), which you'll need to unzip again before uploading.
+        </div>
+    </div>
+
+    <h2>Not a Strava user?</h2>
+    <div class="card">
+        <p>Any app that records a walk can usually export GPX:</p>
+        <ul>
+            <li><strong>Garmin Connect</strong> — open the activity, then the gear or <strong>···</strong> menu →
+                <strong>Export to GPX</strong>.</li>
+            <li><strong>OS Maps</strong> — open the route or recorded activity and look for the download / export option.</li>
+            <li><strong>Komoot</strong> — on a completed tour, <strong>···</strong> → <strong>Export GPX</strong>.</li>
+        </ul>
+    </div>
+
+    <h2>What Tor Bagger does with it</h2>
+    <div class="card">
+        <ul>
+            <li>Any Tor you came within <strong>150 m</strong> of gets bagged automatically.</li>
+            <li>Come within <strong>500 m</strong> but no closer and it's logged as a <strong>near miss</strong> —
+                so you know what to go back for.</li>
+            <li>Each bag is dated from the timestamp on the GPS point itself, so old walks land on the right date
+                rather than today.</li>
+            <li>Tors you've already bagged are skipped, so it's safe to upload the same file twice.</li>
+        </ul>
+        <div class="warn">
+            <strong>Privacy zones:</strong> if you have one set up in Strava around your home, the exported file has the
+            start and end of the walk trimmed off. A Tor inside that trimmed section won't be bagged — you'd need to
+            log it from the map instead.
+        </div>
+    </div>
+
+    <footer>
+        Strava moves its buttons around from time to time, so the exact wording may differ from the above —
+        the export option lives on the activity page either way.
+        <br>
+        <a class="back" href="/">← Back to the map</a>
+    </footer>
+</div>
+</body>
+</html>
