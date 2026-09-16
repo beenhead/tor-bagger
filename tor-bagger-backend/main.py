@@ -527,6 +527,75 @@ def confirm_password_reset(request: Request, req: PasswordResetConfirm, db: Sess
     return {"message": "Password updated. You can now log in."}
 
 
+# --- ROUTE PLANNER ---
+MAX_ROUTE_TORS = 30
+
+class RouteCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    tor_ids: list[int] = Field(..., min_length=2, max_length=MAX_ROUTE_TORS)
+    follow_paths: bool = True
+    round_trip: bool = False
+
+def _route_to_dict(route: models.Route, tors_by_id: dict) -> dict:
+    """Expands the stored id list back into the tors themselves.
+
+    Ids are skipped rather than erroring if a tor has since gone: a saved route
+    that lost one stop is still worth opening.
+    """
+    ids = json.loads(route.tor_ids)
+    stops = [tors_by_id[i] for i in ids if i in tors_by_id]
+    return {
+        "id": route.id,
+        "name": route.name,
+        "follow_paths": route.follow_paths,
+        "round_trip": route.round_trip,
+        "created_at": route.created_at.isoformat() if route.created_at else None,
+        "missing_stops": len(ids) - len(stops),
+        "stops": [
+            {"id": t.id, "name": t.name, "lat": t.lat, "lon": t.lon, "elevation_m": t.elevation_m}
+            for t in stops
+        ],
+    }
+
+@app.post("/routes")
+def create_route(route: RouteCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    known = {row[0] for row in db.query(models.Tor.id).all()}
+    unknown = [i for i in route.tor_ids if i not in known]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown tor ids: {unknown}")
+
+    db_route = models.Route(
+        user_id=current_user.id,
+        name=route.name.strip(),
+        tor_ids=json.dumps(route.tor_ids),
+        follow_paths=route.follow_paths,
+        round_trip=route.round_trip,
+    )
+    db.add(db_route)
+    db.commit()
+    db.refresh(db_route)
+    tors_by_id = {t.id: t for t in db.query(models.Tor).filter(models.Tor.id.in_(route.tor_ids)).all()}
+    return _route_to_dict(db_route, tors_by_id)
+
+@app.get("/routes")
+def list_routes(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    routes = (db.query(models.Route)
+                .filter_by(user_id=current_user.id)
+                .order_by(models.Route.created_at.desc())
+                .all())
+    tors_by_id = {t.id: t for t in db.query(models.Tor).all()}
+    return {"routes": [_route_to_dict(r, tors_by_id) for r in routes]}
+
+@app.delete("/routes/{route_id}")
+def delete_route(route_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    route = db.query(models.Route).filter_by(id=route_id, user_id=current_user.id).first()
+    if not route:
+        raise HTTPException(status_code=404, detail="Route not found")
+    db.delete(route)
+    db.commit()
+    return {"message": "Route deleted."}
+
+
 # --- SIGNED EXPORT / IMPORT ---
 def _canonical_json(obj) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()

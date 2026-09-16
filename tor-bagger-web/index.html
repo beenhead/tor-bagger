@@ -21,6 +21,9 @@
         .hidden { display: none !important; }
         
         input, select, textarea { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        /* The rule above is written for text inputs; a full-width checkbox
+           becomes a block and pushes its own label onto the next line. */
+        input[type="checkbox"] { width: auto; margin: 0 6px 0 0; padding: 0; vertical-align: middle; }
         button { width: 100%; padding: 10px; background: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 10px;}
         button:hover { background: #219653; }
         .btn-admin { background: #3498db; }
@@ -70,6 +73,7 @@
         <button id="main-logout-btn" class="btn-logout hidden" onclick="handleLogout()">Logout</button>
         <div id="nav-menu" class="nav-tabs hidden">
             <button class="nav-btn active" onclick="switchTab('map-panel')">Map</button>
+            <button class="nav-btn" onclick="switchTab('plan-panel')">Plan</button>
             <button class="nav-btn" onclick="switchTab('dashboard-panel')">Stats</button>
             <button class="nav-btn" onclick="switchTab('leaderboard-panel')">Leaders</button>
             <button id="admin-nav-btn" class="nav-btn hidden" onclick="switchTab('admin-panel')" style="color: #3498db; border-left: 1px solid #3498db;">Admin</button>
@@ -147,6 +151,39 @@
 
             <hr style="margin: 18px 0;">
             <button class="btn-admin" onclick="openNewTorForm()">➕ Add Missing Tor</button>
+        </div>
+
+        <div id="plan-panel" class="panel hidden tab-content">
+            <h3>Plan a Route</h3>
+            <p style="font-size: 0.8rem; color: #666; margin: 0 0 8px;">
+                Add the Tors you want to take in, then plot a walking route between them.
+            </p>
+            <input type="text" id="plan-search" placeholder="Add a Tor by name…" oninput="planSearch(this.value)" autocomplete="off">
+            <div id="plan-search-results" class="hidden" style="background: white; border: 1px solid #ddd; border-radius: 4px; max-height: 180px; overflow-y: auto; margin-top: 4px;"></div>
+            <p style="font-size: 0.75rem; color: #888; margin: 6px 0 0;">…or click any Tor on the map and choose <em>Add to route</em>.</p>
+
+            <ol id="plan-list" style="padding-left: 22px; margin: 12px 0; font-size: 0.9rem;"></ol>
+
+            <div style="font-size: 0.85rem; line-height: 1.9;">
+                <label><input type="checkbox" id="plan-round-trip"> Return to the start</label><br>
+                <label><input type="checkbox" id="plan-best-order" checked> Work out the best order</label><br>
+                <label><input type="checkbox" id="plan-follow-paths" checked> Follow paths</label>
+            </div>
+
+            <button onclick="plotRoute()">Plot Route</button>
+            <div id="plan-spinner" class="loader hidden"></div>
+            <div id="plan-stats" class="hidden" style="margin-top: 12px; padding: 10px; border-radius: 6px; background: #eaf6ef; font-size: 0.85rem;"></div>
+            <div id="plan-warning" class="hidden" style="margin-top: 8px; padding: 10px; border-radius: 6px; background: #fdf3e3; border-left: 4px solid #e0a53c; font-size: 0.82rem;"></div>
+
+            <div id="plan-actions" class="hidden">
+                <button class="btn-admin" onclick="downloadRouteGpx()">⬇ Download GPX</button>
+                <input type="text" id="plan-name" placeholder="Name this route" maxlength="100">
+                <button onclick="saveRoute()">Save Route</button>
+            </div>
+
+            <hr style="margin: 18px 0;">
+            <h4 style="margin: 0 0 8px; color: #333;">Saved Routes</h4>
+            <ul id="saved-routes" style="list-style: none; padding: 0; font-size: 0.9rem;"></ul>
         </div>
 
         <div id="dashboard-panel" class="panel hidden tab-content">
@@ -229,6 +266,7 @@
             if(tabId === 'leaderboard-panel') loadLeaderboard();
             if(tabId === 'admin-panel') loadSuggestions();
             if(tabId === 'dashboard-panel') loadMapData();
+            if(tabId === 'plan-panel') loadSavedRoutes();
         }
 
         function showStatus(message, isError = false) {
@@ -403,6 +441,366 @@
             } catch (e) {
                 showStatus("Connection error", true);
             }
+        }
+
+        // --- ROUTE PLANNER ---
+
+        // BRouter is a free, keyless hiking router that sends CORS headers, so the
+        // browser can call it directly. It returns [lon, lat, elevation] triples.
+        const ROUTER_URL = 'https://brouter.de/brouter';
+        const ROUTER_PROFILE = 'hiking-beta';
+        // Past this, a path route is detouring so far that the router is almost
+        // certainly refusing to cross open moor. Dartmoor is access land; walkers
+        // cross it on a bearing, so say so rather than quietly returning nonsense.
+        const DETOUR_WARN_RATIO = 1.6;
+
+        let planTors = [];        // tor ids, in the order the user added them
+        let routeLayer = null;    // the drawn polyline
+        let lastRoute = null;     // {coords, stops, length, ascend, ...} for GPX/save
+
+        function metresBetween(aLat, aLon, bLat, bLon) {
+            const R = 6371000, toRad = d => d * Math.PI / 180;
+            const p1 = toRad(aLat), p2 = toRad(bLat);
+            const dp = toRad(bLat - aLat), dl = toRad(bLon - aLon);
+            const x = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+        }
+
+        // Naismith's rule, the standard British hillwalking estimate:
+        // an hour per 5km, plus an hour per 600m of ascent.
+        function naismithMinutes(metres, ascent) {
+            return Math.round((metres / 1000 / 5 + ascent / 600) * 60);
+        }
+
+        function formatDuration(mins) {
+            const h = Math.floor(mins / 60), m = mins % 60;
+            return h ? `${h}h ${m}m` : `${m}m`;
+        }
+
+        function planAdd(torId) {
+            if (planTors.includes(torId)) { showStatus("That Tor is already in the route", true); return; }
+            if (planTors.length >= 30) { showStatus("30 Tors is the limit for one route", true); return; }
+            planTors.push(torId);
+            renderPlanList();
+            document.getElementById('plan-search').value = '';
+            document.getElementById('plan-search-results').classList.add('hidden');
+            map.closePopup();
+        }
+
+        function planRemove(i) { planTors.splice(i, 1); renderPlanList(); }
+
+        function planMove(i, delta) {
+            const j = i + delta;
+            if (j < 0 || j >= planTors.length) return;
+            [planTors[i], planTors[j]] = [planTors[j], planTors[i]];
+            renderPlanList();
+        }
+
+        function planClear() {
+            planTors = [];
+            lastRoute = null;
+            if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+            ['plan-stats', 'plan-warning', 'plan-actions'].forEach(id =>
+                document.getElementById(id).classList.add('hidden'));
+            renderPlanList();
+        }
+
+        function renderPlanList() {
+            const list = document.getElementById('plan-list');
+            if (!planTors.length) {
+                list.innerHTML = '<li style="color:#999; list-style:none; margin-left:-22px;">No Tors added yet.</li>';
+                return;
+            }
+            list.innerHTML = planTors.map((id, i) => {
+                const tor = torsById.get(id);
+                const name = tor ? tor.name : `Tor #${id}`;
+                return `<li style="padding: 4px 0;">
+                    <strong>${name}</strong>
+                    <span style="float: right;">
+                        <a href="#" onclick="planMove(${i}, -1); return false;" title="Move up" style="color:#888; text-decoration:none;">▲</a>
+                        <a href="#" onclick="planMove(${i}, 1); return false;" title="Move down" style="color:#888; text-decoration:none;">▼</a>
+                        <a href="#" onclick="planRemove(${i}); return false;" title="Remove" style="color:#e74c3c; text-decoration:none;">✕</a>
+                    </span>
+                </li>`;
+            }).join('') + `<li style="list-style:none; margin: 6px 0 0 -22px;">
+                <a href="#" onclick="planClear(); return false;" style="font-size:0.8rem; color:#e74c3c;">Clear all</a></li>`;
+        }
+
+        function planSearch(query) {
+            const box = document.getElementById('plan-search-results');
+            const q = query.trim().toLowerCase();
+            if (q.length < 2) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+            const matches = [...torsById.values()]
+                .filter(t => t.name.toLowerCase().includes(q) && !planTors.includes(t.id))
+                .slice(0, 8);
+            box.innerHTML = matches.length
+                ? matches.map(t => `<div onclick="planAdd(${t.id})" style="padding: 8px 10px; cursor: pointer; border-bottom: 1px solid #eee;">➕ <strong>${t.name}</strong></div>`).join('')
+                : '<div style="padding: 10px; color: #999; font-size: 0.85rem;">No matches</div>';
+            box.classList.remove('hidden');
+        }
+
+        // Shortest visiting order. Exact for the sizes people actually plan;
+        // nearest-neighbour plus 2-opt beyond that. The first stop stays put —
+        // it is where you parked.
+        function orderStops(stops, roundTrip) {
+            if (stops.length <= 3) return stops;
+            const d = (a, b) => metresBetween(a.lat, a.lon, b.lat, b.lon);
+            const cost = order => {
+                let total = 0;
+                for (let i = 0; i < order.length - 1; i++) total += d(order[i], order[i + 1]);
+                if (roundTrip) total += d(order[order.length - 1], order[0]);
+                return total;
+            };
+            const rest = stops.slice(1);
+
+            if (rest.length <= 8) {
+                let best = stops, bestCost = Infinity;
+                const permute = (pool, chosen) => {
+                    if (!pool.length) {
+                        const order = [stops[0], ...chosen];
+                        const c = cost(order);
+                        if (c < bestCost) { bestCost = c; best = order; }
+                        return;
+                    }
+                    for (let i = 0; i < pool.length; i++)
+                        permute(pool.slice(0, i).concat(pool.slice(i + 1)), chosen.concat([pool[i]]));
+                };
+                permute(rest, []);
+                return best;
+            }
+
+            let order = [stops[0]], pool = rest.slice();
+            while (pool.length) {
+                const last = order[order.length - 1];
+                let bi = 0, bd = Infinity;
+                pool.forEach((p, i) => { const x = d(last, p); if (x < bd) { bd = x; bi = i; } });
+                order.push(pool.splice(bi, 1)[0]);
+            }
+            let improved = true;
+            while (improved) {
+                improved = false;
+                for (let i = 1; i < order.length - 1; i++) {
+                    for (let j = i + 1; j < order.length; j++) {
+                        const cand = order.slice(0, i)
+                            .concat(order.slice(i, j + 1).reverse(), order.slice(j + 1));
+                        if (cost(cand) < cost(order) - 0.001) { order = cand; improved = true; }
+                    }
+                }
+            }
+            return order;
+        }
+
+        async function fetchPathRoute(points) {
+            const lonlats = points.map(p => `${p.lon},${p.lat}`).join('|');
+            const url = `${ROUTER_URL}?lonlats=${encodeURIComponent(lonlats)}`
+                      + `&profile=${ROUTER_PROFILE}&alternativeidx=0&format=geojson`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`the routing service returned ${res.status}`);
+            const geo = await res.json();
+            const feature = geo.features && geo.features[0];
+            if (!feature || !feature.geometry) throw new Error("the routing service found no route");
+            const props = feature.properties || {};
+            return {
+                coords: feature.geometry.coordinates,
+                length: parseFloat(props['track-length']) || 0,
+                ascent: parseFloat(props['filtered ascend']) || 0,
+                onPaths: true
+            };
+        }
+
+        // Straight legs between Tors. Honest on open access land, and the only
+        // option if the router is unreachable. Ascent can only be inferred from
+        // the Tors' own heights, so it is a floor, not a real figure.
+        function straightLineRoute(points) {
+            let length = 0, ascent = 0;
+            for (let i = 0; i < points.length - 1; i++) {
+                length += metresBetween(points[i].lat, points[i].lon, points[i + 1].lat, points[i + 1].lon);
+                const climb = (points[i + 1].elevation_m || 0) - (points[i].elevation_m || 0);
+                if (climb > 0) ascent += climb;
+            }
+            return {
+                coords: points.map(p => [p.lon, p.lat, p.elevation_m || 0]),
+                length, ascent, onPaths: false, ascentIsApproximate: true
+            };
+        }
+
+        async function plotRoute() {
+            const stops = planTors.map(id => torsById.get(id)).filter(Boolean);
+            if (stops.length < 2) { showStatus("Add at least two Tors to plot a route", true); return; }
+
+            const roundTrip = document.getElementById('plan-round-trip').checked;
+            const followPaths = document.getElementById('plan-follow-paths').checked;
+            const ordered = document.getElementById('plan-best-order').checked
+                ? orderStops(stops, roundTrip) : stops;
+            const points = roundTrip ? ordered.concat([ordered[0]]) : ordered;
+
+            const spinner = document.getElementById('plan-spinner');
+            spinner.classList.remove('hidden');
+            document.getElementById('plan-warning').classList.add('hidden');
+
+            let result;
+            try {
+                result = followPaths ? await fetchPathRoute(points) : straightLineRoute(points);
+            } catch (e) {
+                // A dead router should not cost you the plan you just built.
+                showStatus(`Couldn't reach the routing service (${e.message}) — showing direct lines instead.`, true);
+                result = straightLineRoute(points);
+            } finally {
+                spinner.classList.add('hidden');
+            }
+
+            let crow = 0;
+            for (let i = 0; i < points.length - 1; i++)
+                crow += metresBetween(points[i].lat, points[i].lon, points[i + 1].lat, points[i + 1].lon);
+
+            if (routeLayer) map.removeLayer(routeLayer);
+            routeLayer = L.polyline(result.coords.map(c => [c[1], c[0]]), {
+                color: '#e67e22', weight: 4, opacity: 0.85,
+                dashArray: result.onPaths ? null : '8, 6'
+            }).addTo(map);
+            map.fitBounds(routeLayer.getBounds(), { padding: [30, 30] });
+
+            lastRoute = { ...result, stops: ordered, roundTrip, points };
+
+            const mins = naismithMinutes(result.length, result.ascent);
+            document.getElementById('plan-stats').innerHTML =
+                `<strong>${(result.length / 1000).toFixed(1)} km</strong> · `
+                + `${Math.round(result.ascent)} m ascent${result.ascentIsApproximate ? '*' : ''} · `
+                + `about <strong>${formatDuration(mins)}</strong><br>`
+                + `<span style="color:#666;">${ordered.length} Tors`
+                + `${roundTrip ? ', returning to the start' : ''}`
+                + `${result.onPaths ? ', following paths' : ', direct lines'}`
+                + `. Naismith's rule.${result.ascentIsApproximate ? ' *Ascent from Tor heights only — the ground between them is not counted.' : ''}</span>`;
+            document.getElementById('plan-stats').classList.remove('hidden');
+            document.getElementById('plan-actions').classList.remove('hidden');
+
+            if (!result.onPaths) {
+                // A straight line over Dartmoor can cross a river, a mire, or one
+                // of the three live firing ranges. Worth saying out loud.
+                document.getElementById('plan-warning').innerHTML =
+                    `Direct lines ignore rivers, bogs, walls and Dartmoor's military firing ranges `
+                    + `(Okehampton, Merrivale and Willsworthy). Check the range firing times and carry a `
+                    + `map and compass — this is a distance estimate, not a followable track.`;
+                document.getElementById('plan-warning').classList.remove('hidden');
+            } else if (crow > 0 && result.length / crow > DETOUR_WARN_RATIO) {
+                document.getElementById('plan-warning').innerHTML =
+                    `This path route is <strong>${(result.length / crow).toFixed(1)}×</strong> the straight-line distance `
+                    + `(${(crow / 1000).toFixed(1)} km direct). There is probably no mapped path between these Tors, so the `
+                    + `router has gone the long way round. On open moor you would walk it on a bearing — untick `
+                    + `<em>Follow paths</em> to see that line instead.`;
+                document.getElementById('plan-warning').classList.remove('hidden');
+            }
+        }
+
+        function xmlEscape(str) {
+            return String(str).replace(/[<>&'"]/g, c =>
+                ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+        }
+
+        function downloadRouteGpx() {
+            if (!lastRoute) { showStatus("Plot a route first", true); return; }
+            const name = (document.getElementById('plan-name').value || 'Tor Bagger route').trim();
+            // Deliberately no <time> elements: this is a plan, not a recording.
+            const parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+                '<gpx version="1.1" creator="Tor Bagger" xmlns="http://www.topografix.com/GPX/1/1">',
+                `<metadata><name>${xmlEscape(name)}</name></metadata>`];
+            lastRoute.stops.forEach(t => {
+                parts.push(`<wpt lat="${t.lat}" lon="${t.lon}">`
+                    + `<name>${xmlEscape(t.name)}</name>`
+                    + (t.elevation_m ? `<ele>${t.elevation_m}</ele>` : '')
+                    + `</wpt>`);
+            });
+            parts.push(`<trk><name>${xmlEscape(name)}</name><trkseg>`);
+            lastRoute.coords.forEach(c => {
+                parts.push(`<trkpt lat="${c[1]}" lon="${c[0]}">`
+                    + (c.length > 2 && c[2] != null ? `<ele>${c[2]}</ele>` : '') + `</trkpt>`);
+            });
+            parts.push('</trkseg></trk></gpx>');
+
+            const blob = new Blob([parts.join('\n')], { type: 'application/gpx+xml' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '.gpx';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(a.href);
+        }
+
+        async function saveRoute() {
+            if (!lastRoute) { showStatus("Plot the route before saving it", true); return; }
+            const name = document.getElementById('plan-name').value.trim();
+            if (!name) { showStatus("Give the route a name first", true); return; }
+            const res = await fetch('/api/routes', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${localStorage.getItem('tor_token')}`,
+                    'Content-Type': 'application/json'
+                },
+                // The order actually plotted, so reopening it gives the same walk.
+                body: JSON.stringify({
+                    name,
+                    tor_ids: lastRoute.stops.map(t => t.id),
+                    follow_paths: !!lastRoute.onPaths,
+                    round_trip: !!lastRoute.roundTrip
+                })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                const why = typeof data.detail === 'string' ? data.detail : "couldn't save that route";
+                showStatus(`Save failed — ${why}`, true);
+                return;
+            }
+            showStatus(`Saved "${name}".`);
+            document.getElementById('plan-name').value = '';
+            loadSavedRoutes();
+        }
+
+        async function loadSavedRoutes() {
+            const list = document.getElementById('saved-routes');
+            const token = localStorage.getItem('tor_token');
+            if (!token) { list.innerHTML = ''; return; }
+            const res = await fetch('/api/routes', { headers: { 'Authorization': `Bearer ${token}` } });
+            if (!res.ok) { list.innerHTML = '<li style="color:#999;">Could not load saved routes.</li>'; return; }
+            const data = await res.json();
+            if (!data.routes.length) {
+                list.innerHTML = '<li style="color:#999;">Nothing saved yet.</li>';
+                return;
+            }
+            list.innerHTML = data.routes.map(r => `
+                <li style="padding: 8px 0; border-bottom: 1px solid #eee;">
+                    <a href="#" onclick="openSavedRoute(${r.id}); return false;" style="color:#27ae60; font-weight:bold; text-decoration:none;">${r.name}</a>
+                    <a href="#" onclick="deleteSavedRoute(${r.id}); return false;" style="float:right; color:#e74c3c; text-decoration:none;" title="Delete">✕</a>
+                    <br><span style="color:#888; font-size:0.8rem;">${r.stops.length} Tors${r.round_trip ? ' · round trip' : ''}${r.follow_paths ? '' : ' · direct lines'}${r.missing_stops ? ` · ${r.missing_stops} missing` : ''}</span>
+                </li>`).join('');
+            savedRoutesById = new Map(data.routes.map(r => [r.id, r]));
+        }
+
+        let savedRoutesById = new Map();
+
+        function openSavedRoute(id) {
+            const route = savedRoutesById.get(id);
+            if (!route) return;
+            planTors = route.stops.map(s => s.id);
+            document.getElementById('plan-round-trip').checked = route.round_trip;
+            document.getElementById('plan-follow-paths').checked = route.follow_paths;
+            // The stored order is the one that was plotted; re-optimising would
+            // silently change a route the user had settled on.
+            document.getElementById('plan-best-order').checked = false;
+            document.getElementById('plan-name').value = route.name;
+            renderPlanList();
+            plotRoute();
+        }
+
+        async function deleteSavedRoute(id) {
+            const route = savedRoutesById.get(id);
+            if (!confirm(`Delete "${route ? route.name : 'this route'}"?`)) return;
+            const res = await fetch(`/api/routes/${id}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+            });
+            if (!res.ok) { showStatus("Couldn't delete that route", true); return; }
+            loadSavedRoutes();
         }
 
         // --- Strava bulk export import ---
@@ -648,6 +1046,7 @@
                 if(isBagged) {
                     popup += `<hr><textarea id="c-${tor.id}" placeholder="Review..." style="height:30px"></textarea><button onclick="submitReview(${tor.id})" style="padding:4px; font-size:0.7rem">Rate 5⭐</button>`;
                 }
+                popup += `<br><a href="#" onclick="planAdd(${tor.id}); return false;" style="font-size:0.75rem; color:#27ae60; font-weight:bold;">➕ Add to route</a>`;
                 popup += `<br><a href="#" onclick="openEditForm(${tor.id}); return false;" style="font-size:0.7rem; color:#3498db">Suggest Correction</a></div>`;
                 
                 marker.bindPopup(popup).on('popupopen', () => fetchReviews(tor.id));
@@ -1003,6 +1402,7 @@
             document.getElementById('leaderboard-body').innerHTML = data.map(r => `<tr><td>${r.rank}</td><td>${r.username}</td><td>${r.total_bagged}</td></tr>`).join('');
         }
 
+        renderPlanList();
         checkAuth();
     </script>
 </body>
