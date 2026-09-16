@@ -9,6 +9,7 @@ This project allows hikers to track their progress across the moor. It features 
 *   **Interactive Web Map:** A Leaflet.js powered frontend visualizing all Dartmoor Tors. Pins are color-coded by user-specific bagged / un-bagged state.
 *   **GPX Route Processing:** Upload a `.gpx` file from Strava, Garmin, or OS Maps. The engine scans the route, automatically bags any Tors you passed within 150 meters of, and dates each bag from the GPX point's own timestamp. `gpx-help.html`, linked from the upload box, walks users through exporting one from Strava.
 *   **Strava Bulk Import:** Feed in the whole-history `.zip` Strava emails you. The archive is opened *in the browser* — its activity list is read to find the walks, hikes and runs, and only those tracks are uploaded, one at a time, with a progress bar. Rides, photos and videos are never sent anywhere.
+*   **Route Planner:** Pick a set of Tors and plot a walking route between them. Works out the shortest visiting order, follows real paths via [BRouter](https://brouter.de), and reports distance, ascent and a Naismith time estimate. Routes save to your account and export as GPX for your watch — which then comes back in as a recorded track to bag what you walked.
 *   **Near Miss Detection:** Agonizingly close? The app detects if you walked within 500 meters of a Tor but missed the summit, logging it as a "Near Miss."
 *   **Mobile App (lean v1):** Flutter app for iOS and Android — login, live map, GPS-based live bagging.
 *   **Secure Authentication:** Full user registration and login system protected by bcrypt password hashing and JWT (JSON Web Tokens).
@@ -180,6 +181,22 @@ TLS terminator becomes necessary — set `WEB_BIND=0.0.0.0` and put one in front
     most, comfortably inside nginx's 25 MB limit.
 *   `/upload-gpx` sniffs gzip magic bytes, so a `.gpx.gz` can be uploaded
     directly without being unpacked first.
+*   The route planner calls BRouter from the browser. It needs no API key and
+    sends `Access-Control-Allow-Origin: *`, so there is nothing to proxy and no
+    secret to keep — but it is a community-run service with no SLA. If it is
+    unreachable the planner falls back to direct lines and says so, rather than
+    losing the plan. Self-hosting BRouter is the upgrade path if it proves
+    flaky.
+*   **Path routing cannot cross open moor**, and that shapes the planner. A
+    router only knows mapped ways, so between two Tors with no path between them
+    it goes the long way round — Fur Tor to Great Links Tor comes back as 21km
+    against a 4.7km straight line. Much of northern Dartmoor is open access land
+    that walkers cross on a bearing, so the planner offers a direct-line mode and
+    warns automatically when a path route exceeds `DETOUR_WARN_RATIO` times the
+    crow-flies distance. Neither mode is right for the whole moor; the point is
+    to make the difference visible.
+*   Routes store only the ordered tor ids, not the plotted line. The geometry is
+    thousands of coordinates and is cheap to re-request when a route is reopened.
 
 ## 🚀 Getting Started
 

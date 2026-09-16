@@ -77,6 +77,23 @@ class TorReview(Base):
     tor = relationship("Tor")
 
 
+class Route(Base):
+    __tablename__ = "routes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    name = Column(String(100), nullable=False)
+    # The ordered list of tor ids, as a JSON array. Only the plan is stored,
+    # not the plotted line: the geometry is tens of thousands of coordinates
+    # and is cheap to ask the router for again when the route is reopened.
+    tor_ids = Column(Text, nullable=False)
+    follow_paths = Column(Boolean, default=True)
+    round_trip = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    user = relationship("User")
+
+
 class PasswordResetToken(Base):
     __tablename__ = "password_reset_tokens"
 
