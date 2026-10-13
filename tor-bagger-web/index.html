@@ -238,6 +238,8 @@
         <div id="admin-panel" class="panel hidden tab-content">
             <h3 style="color: #3498db;">Approval Queue</h3>
             <div id="suggestion-list">No pending suggestions.</div>
+            <h3 style="color: #3498db;">Review Queue</h3>
+            <div id="review-queue">No pending reviews.</div>
         </div>
 
         <div id="status-box" class="hidden"></div>
@@ -280,7 +282,7 @@
             document.getElementById(tabId).classList.remove('hidden');
             event.target.classList.add('active');
             if(tabId === 'leaderboard-panel') loadLeaderboard();
-            if(tabId === 'admin-panel') loadSuggestions();
+            if(tabId === 'admin-panel') { loadSuggestions(); loadReviewQueue(); }
             if(tabId === 'dashboard-panel') loadMapData();
             if(tabId === 'plan-panel') loadSavedRoutes();
         }
@@ -1080,8 +1082,21 @@
                     </div>`;
                 }
 
-                if(isBagged) {
-                    popup += `<hr><textarea id="c-${tor.id}" placeholder="Review..." style="height:30px"></textarea><button onclick="submitReview(${tor.id})" style="padding:4px; font-size:0.7rem">Rate 5⭐</button>`;
+                if (isBagged) {
+                    popup += `<hr><div style="font-size: 0.8rem;">
+                        <b id="review-heading-${tor.id}">Your review</b>
+                        <div id="rate-${tor.id}" data-rating="0" style="font-size: 1.2rem; cursor: pointer; user-select: none; margin: 2px 0;">
+                            ${[1, 2, 3, 4, 5].map(n => `<span onclick="setReviewRating(${tor.id}, ${n})" title="${n} star${n > 1 ? 's' : ''}" style="opacity: 0.25;">⭐</span>`).join('')}
+                        </div>
+                        <textarea id="c-${tor.id}" maxlength="500" placeholder="How was it? (optional)" style="height: 50px; margin: 4px 0; font-size: 0.8rem;"></textarea>
+                        <div style="display: flex; gap: 6px; align-items: center;">
+                            <button onclick="submitReview(${tor.id})" style="margin: 0; padding: 6px; font-size: 0.8rem; width: auto;">Submit review</button>
+                            <a href="#" id="review-delete-${tor.id}" class="hidden" onclick="deleteReview(${tor.id}); return false;" style="color: #e74c3c; font-size: 0.75rem;">Delete</a>
+                        </div>
+                        <div style="font-size: 0.7rem; color: #888; margin-top: 4px;">Reviews appear once an admin approves them.</div>
+                    </div>`;
+                } else if (loggedIn) {
+                    popup += `<div style="font-size: 0.7rem; color: #888; margin-top: 4px;">Bag this Tor to leave a review.</div>`;
                 }
                 popup += `<br><a href="#" onclick="planAdd(${tor.id}); return false;" style="font-size:0.75rem; color:#27ae60; font-weight:bold;">➕ Add to route</a>`;
                 popup += `<br><a href="#" onclick="openEditForm(${tor.id}); return false;" style="font-size:0.7rem; color:#3498db">Suggest Correction</a></div>`;
@@ -1202,18 +1217,82 @@
             loadMapData();
         }
 
+        // Reviews are user-written: anything from them goes through this
+        // before it touches innerHTML.
+        function escapeHtml(str) {
+            return String(str ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        const REVIEW_STATUS_LABELS = {
+            pending: '<span style="color: #e67e22;">awaiting approval</span>',
+            rejected: '<span style="color: #e74c3c;">not approved</span>',
+        };
+
         async function fetchReviews(id) {
-            const res = await fetch(`/api/tors/${id}/reviews`);
+            const token = localStorage.getItem('tor_token');
+            const res = await fetch(`/api/tors/${id}/reviews`, token ? { headers: { 'Authorization': `Bearer ${token}` } } : {});
+            const box = document.getElementById(`revs-${id}`);
+            if (!box) return;
+            if (!res.ok) {
+                box.textContent = "Couldn't load reviews.";
+                return;
+            }
             const revs = await res.json();
-            document.getElementById(`revs-${id}`).innerHTML = revs.length ? revs.map(r => `<div>${"⭐".repeat(r.rating)}: ${r.comment}</div>`).join('') : "No reviews.";
+            box.innerHTML = revs.length ? revs.map(r => `
+                <div style="margin-bottom: 6px;">
+                    ${"⭐".repeat(r.rating)} <b>${escapeHtml(r.username)}</b>${r.is_mine ? ' (you)' : ''}
+                    <span style="color: #999;">${r.created_at ? new Date(r.created_at + 'Z').toLocaleDateString() : ''}</span>
+                    ${r.is_mine && REVIEW_STATUS_LABELS[r.status] ? `· ${REVIEW_STATUS_LABELS[r.status]}` : ''}
+                    ${r.comment ? `<div style="white-space: pre-wrap;">${escapeHtml(r.comment)}</div>` : ''}
+                </div>`).join('') : "No reviews yet.";
+
+            // Pre-fill the form with the viewer's own review so submitting edits it.
+            const mine = revs.find(r => r.is_mine);
+            if (mine && document.getElementById(`rate-${id}`)) {
+                setReviewRating(id, mine.rating);
+                document.getElementById(`c-${id}`).value = mine.comment;
+                document.getElementById(`review-heading-${id}`).textContent = 'Edit your review';
+                document.getElementById(`review-delete-${id}`).classList.remove('hidden');
+            }
+        }
+
+        function setReviewRating(id, rating) {
+            const picker = document.getElementById(`rate-${id}`);
+            picker.dataset.rating = rating;
+            picker.querySelectorAll('span').forEach((star, i) => star.style.opacity = i < rating ? 1 : 0.25);
         }
 
         async function submitReview(id) {
-            await fetch(`/api/tors/${id}/reviews`, {
+            const rating = parseInt(document.getElementById(`rate-${id}`).dataset.rating, 10);
+            if (!rating) {
+                alert("Pick a star rating first.");
+                return;
+            }
+            const res = await fetch(`/api/tors/${id}/reviews`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ rating: 5, comment: document.getElementById(`c-${id}`).value })
+                body: JSON.stringify({ rating, comment: document.getElementById(`c-${id}`).value })
             });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                alert(typeof data.detail === 'string' ? data.detail : "Couldn't save your review.");
+                return;
+            }
+            showStatus(data.message);
+            fetchReviews(id);
+        }
+
+        async function deleteReview(id) {
+            if (!confirm("Delete your review?")) return;
+            const res = await fetch(`/api/tors/${id}/reviews`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                alert(err.detail || "Couldn't delete your review.");
+                return;
+            }
             map.closePopup();
             loadMapData();
         }
@@ -1415,6 +1494,47 @@
                 body: JSON.stringify(payload)
             });
             loadSuggestions();
+            loadMapData();
+        }
+
+        async function loadReviewQueue() {
+            const res = await fetch('/api/admin/reviews', {
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+            });
+            const list = document.getElementById('review-queue');
+            if (!res.ok) {
+                list.textContent = "Couldn't load the review queue.";
+                return;
+            }
+            const data = await res.json();
+            if (data.length === 0) {
+                list.innerHTML = "No pending reviews.";
+                return;
+            }
+            list.innerHTML = data.map(r => `
+                <div class="panel" style="background:#fff; font-size:0.75rem; border-left: 5px solid #3498db;">
+                    <strong>${escapeHtml(r.tor_name)}</strong> · ${"⭐".repeat(r.rating)} by <b>${escapeHtml(r.username)}</b>
+                    <div style="white-space: pre-wrap; margin: 6px 0; color: #444;">${r.comment ? escapeHtml(r.comment) : '<i>No comment, rating only.</i>'}</div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn-admin" onclick="moderateReview(${r.id}, 'approve')" style="flex: 1;">Approve</button>
+                        <button class="btn-logout" onclick="moderateReview(${r.id}, 'reject')" style="flex: 1; margin-top: 10px;">Reject</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function moderateReview(rid, action) {
+            const res = await fetch(`/api/admin/reviews/${rid}/${action}`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                showStatus(`Couldn't ${action} review: ` + (data.detail || res.statusText), true);
+                return;
+            }
+            showStatus(data.message);
+            loadReviewQueue();
             loadMapData();
         }
 
