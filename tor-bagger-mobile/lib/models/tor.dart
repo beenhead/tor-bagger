@@ -35,7 +35,12 @@ class BaggedLog {
   final String torName;
   final DateTime? baggedAt;
 
-  BaggedLog({required this.torId, required this.torName, this.baggedAt});
+  /// "gpx", "gps" or "manual". Manual is a self-reported "I visited".
+  final String source;
+
+  BaggedLog({required this.torId, required this.torName, this.baggedAt, required this.source});
+
+  bool get verified => source != 'manual';
 
   factory BaggedLog.fromJson(Map<String, dynamic> json) {
     final raw = json['bagged_at'] as String?;
@@ -43,6 +48,7 @@ class BaggedLog {
       torId: json['tor_id'] as int,
       torName: json['tor_name'] as String,
       baggedAt: raw == null ? null : DateTime.tryParse(raw),
+      source: (json['source'] ?? 'gpx') as String,
     );
   }
 }

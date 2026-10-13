@@ -37,7 +37,15 @@
         /* Dashboard & Table Styles */
         .stat-box { background: white; padding: 15px; border-radius: 6px; text-align: center; border: 1px solid #ddd; }
         .progress-bar-bg { background: #e9ecef; height: 12px; border-radius: 10px; overflow: hidden; margin-top: 10px;}
-        .progress-bar-fill { background: #27ae60; height: 100%; width: 0%; transition: width 0.5s ease;}
+        .progress-bar-fill { background: #27ae60; height: 100%; width: 0%; transition: width 0.5s ease; float: left;}
+        .progress-bar-fill.self-reported { background: #a9dfbf; }
+
+        /* Verified vs self-reported bags: solid green vs a hollow green ring,
+           on the map pins, the legend and the logbook badges alike. */
+        .bag-badge { font-size: 0.7rem; padding: 1px 6px; border-radius: 8px; white-space: nowrap; font-weight: bold; }
+        .bag-badge.verified { background: #27ae60; color: white; }
+        .bag-badge.self-reported { background: white; color: #1e8449; border: 1px solid #27ae60; }
+        .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; margin: 0 3px 0 8px; box-sizing: border-box; }
         table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
         th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
 
@@ -69,7 +77,12 @@
 
     <div id="sidebar">
         <h1>⛰️ Tor Bagger</h1>
-        <div id="tor-total-line" style="font-size: 0.8rem; color: #777; margin: -4px 0 14px;">Loading Tors…</div>
+        <div id="tor-total-line" style="font-size: 0.8rem; color: #777; margin: -4px 0 4px;">Loading Tors…</div>
+        <div style="font-size: 0.75rem; color: #777; margin: 0 0 14px;">
+            <span class="legend-dot" style="background: #27ae60; margin-left: 0;"></span>Verified
+            <span class="legend-dot" style="background: white; border: 2px solid #27ae60;"></span>Self-reported
+            <span class="legend-dot" style="background: #7f8c8d;"></span>Not bagged
+        </div>
         <button id="main-logout-btn" class="btn-logout hidden" onclick="handleLogout()">Logout</button>
         <div id="nav-menu" class="nav-tabs hidden">
             <button class="nav-btn active" onclick="switchTab('map-panel')">Map</button>
@@ -191,7 +204,8 @@
             <div class="stat-box">
                 <div id="dash-bagged-count" style="font-size: 2rem; font-weight: bold; color: #27ae60;">0</div>
                 <div id="dash-total-tors" style="font-size: 0.8rem; color: #666;">Tors Bagged</div>
-                <div class="progress-bar-bg"><div class="progress-bar-fill" id="dash-progress-fill"></div></div>
+                <div id="dash-verified-split" style="font-size: 0.8rem; color: #666; margin-top: 4px;"></div>
+                <div class="progress-bar-bg"><div class="progress-bar-fill" id="dash-progress-fill"></div><div class="progress-bar-fill self-reported" id="dash-progress-fill-self"></div></div>
             </div>
             <hr>
             <div style="text-align: left; margin-top: 15px;">
@@ -214,9 +228,10 @@
         <div id="leaderboard-panel" class="panel hidden tab-content">
             <h3>Leaderboard</h3>
             <table>
-                <thead><tr><th>#</th><th>User</th><th>Bagged</th></tr></thead>
+                <thead><tr><th>#</th><th>User</th><th title="GPX or GPS verified bags decide the ranking">Verified</th><th title="Including self-reported visits">Total</th></tr></thead>
                 <tbody id="leaderboard-body"></tbody>
             </table>
+            <p style="font-size: 0.75rem; color: #888; margin: 8px 0 0;">Ranked by verified bags. Self-reported visits count towards the total only.</p>
         </div>
 
         <div id="admin-panel" class="panel hidden tab-content">
@@ -939,6 +954,7 @@
                 }
 
                 const bagged = new Set();
+                const verified = new Set();
                 let processed = 0, failed = 0, missing = 0, nearMisses = 0;
 
                 for (const act of wanted) {
@@ -969,6 +985,7 @@
                         if (!res.ok) { failed++; continue; }
                         const data = await res.json();
                         (data.tors_bagged_on_this_walk || []).forEach(n => bagged.add(n));
+                        (data.tors_verified_on_this_walk || []).forEach(n => verified.add(n));
                         nearMisses += (data.near_misses || []).length;
                     } catch (e) {
                         failed++;
@@ -985,6 +1002,9 @@
                     (bagged.size
                         ? `Bagged ${bagged.size} new Tor${bagged.size === 1 ? '' : 's'}: ${[...bagged].join(', ')}`
                         : "No new Tors — you'd already bagged everything on those routes.") +
+                    (verified.size
+                        ? `<br>Verified ${verified.size} self-reported visit${verified.size === 1 ? '' : 's'}: ${[...verified].join(', ')}`
+                        : '') +
                     (notes.length ? `<br><span style="color:#666;">${notes.join('. ')}.</span>` : '')
                 );
                 zipProgress(wanted.length, wanted.length, "Done.");
@@ -1005,23 +1025,26 @@
             const totalTors = torsData.tors.length;
             document.getElementById('tor-total-line').innerText =
                 `${totalTors} ${totalTors === 1 ? 'Tor' : 'Tors'} mapped on Dartmoor`;
-            let baggedIds = [];
-            if (localStorage.getItem('tor_token')) {
+            const logsByTorId = new Map();
+            const loggedIn = !!localStorage.getItem('tor_token');
+            if (loggedIn) {
                 const res = await fetch('/api/my-bagged-tors', {
                     headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
                 });
                 if (res.ok) {
                     const d = await res.json();
-                    baggedIds = (d.logs || []).map(l => l.tor_id);
+                    (d.logs || []).forEach(l => logsByTorId.set(l.tor_id, l));
                     updateDashboard(d.logs || [], totalTors);
                 }
             }
             torsData.tors.forEach(tor => {
-                const isBagged = baggedIds.includes(tor.id);
-                const marker = L.circleMarker([tor.lat, tor.lon], {
-                    radius: isBagged ? 9 : 7, fillColor: isBagged ? "#27ae60" : "#7f8c8d",
-                    color: "#fff", weight: 2, fillOpacity: 0.9
-                });
+                const log = logsByTorId.get(tor.id);
+                const isBagged = !!log;
+                const marker = L.circleMarker([tor.lat, tor.lon], !isBagged
+                    ? { radius: 7, fillColor: "#7f8c8d", color: "#fff", weight: 2, fillOpacity: 0.9 }
+                    : log.verified
+                        ? { radius: 9, fillColor: "#27ae60", color: "#fff", weight: 2, fillOpacity: 0.9 }
+                        : { radius: 8, fillColor: "#fff", color: "#27ae60", weight: 3, fillOpacity: 0.9 });
                 
                 const stars = tor.avg_rating > 0 ? "⭐".repeat(Math.round(tor.avg_rating)) : "No ratings";
                 const description = tor.description ? `<p style="font-size: 0.8rem; color: #444;">${tor.description}</p>` : "<i>No description available.</i>";
@@ -1042,6 +1065,19 @@
                         </div>
                 `;
 
+
+                if (isBagged) {
+                    popup += `<hr><div style="font-size: 0.8rem;">${bagBadge(log)} ${log.bagged_at ? new Date(log.bagged_at).toLocaleDateString() : ''}</div>`;
+                    if (!log.verified) {
+                        popup += `<div style="font-size: 0.75rem; color: #666; margin-top: 4px;">Upload a GPX track through it to verify. <a href="#" onclick="removeVisit(${tor.id}); return false;" style="color: #e74c3c;">Remove</a></div>`;
+                    }
+                } else if (loggedIn) {
+                    const today = localDateString(new Date());
+                    popup += `<hr><div style="display: flex; gap: 6px; align-items: center;">
+                        <input type="date" id="visit-date-${tor.id}" value="${today}" max="${today}" style="margin: 0; padding: 5px; font-size: 0.8rem;">
+                        <button onclick="recordVisit(${tor.id})" style="margin: 0; padding: 6px; font-size: 0.8rem; width: auto; white-space: nowrap;">I visited</button>
+                    </div>`;
+                }
 
                 if(isBagged) {
                     popup += `<hr><textarea id="c-${tor.id}" placeholder="Review..." style="height:30px"></textarea><button onclick="submitReview(${tor.id})" style="padding:4px; font-size:0.7rem">Rate 5⭐</button>`;
@@ -1097,23 +1133,72 @@
 
         function updateDashboard(logs, totalTors) {
             const count = logs.length;
+            const verified = logs.filter(l => l.verified).length;
             document.getElementById('dash-bagged-count').innerText = count;
             document.getElementById('dash-total-tors').innerText =
                 totalTors > 0 ? `Tors Bagged of ${totalTors}` : 'Tors Bagged';
-            const pct = totalTors > 0 ? (count / totalTors) * 100 : 0;
-            document.getElementById('dash-progress-fill').style.width = `${pct}%`;
+            document.getElementById('dash-verified-split').innerHTML = count > 0
+                ? `<span class="bag-badge verified">${verified} verified</span> <span class="bag-badge self-reported">${count - verified} self-reported</span>`
+                : '';
+            const pctOf = n => totalTors > 0 ? (n / totalTors) * 100 : 0;
+            document.getElementById('dash-progress-fill').style.width = `${pctOf(verified)}%`;
+            document.getElementById('dash-progress-fill-self').style.width = `${pctOf(count - verified)}%`;
 
             const list = document.getElementById('bagged-tors-list');
             if (count > 0) {
                 list.innerHTML = logs.map(log => `
                     <li style="padding: 8px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between;">
-                        <span>⛰️ <strong>${log.tor_name}</strong></span>
+                        <span>⛰️ <strong>${log.tor_name}</strong> ${bagBadge(log)}</span>
                         <span style="color: #888; font-size: 0.8rem;">${log.bagged_at ? new Date(log.bagged_at).toLocaleDateString() : ''}</span>
                     </li>
                 `).join('');
             } else {
                 list.innerHTML = "<li style='color: #999;'>No tors bagged yet. Time to hike!</li>";
             }
+        }
+
+        function bagBadge(log) {
+            if (!log.verified) return '<span class="bag-badge self-reported" title="Logged with I visited — no track yet">Self-reported</span>';
+            const how = log.source === 'gps' ? 'GPS' : 'GPX';
+            return `<span class="bag-badge verified" title="Confirmed by ${how === 'GPS' ? 'live phone GPS' : 'an uploaded track'}">${how} verified</span>`;
+        }
+
+        // YYYY-MM-DD in the viewer's own timezone — toISOString() is UTC and
+        // would be "tomorrow" late in the evening east of Greenwich.
+        function localDateString(d) {
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+
+        async function recordVisit(torId) {
+            const visitedOn = document.getElementById(`visit-date-${torId}`).value;
+            const res = await fetch(`/api/tors/${torId}/visit`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(visitedOn ? { visited_on: visitedOn } : {})
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                alert(err.detail || "Couldn't record that visit.");
+                return;
+            }
+            map.closePopup();
+            loadMapData();
+        }
+
+        async function removeVisit(torId) {
+            const tor = torsById.get(torId);
+            if (!confirm(`Remove your self-reported visit to ${tor ? tor.name : 'this tor'}?`)) return;
+            const res = await fetch(`/api/tors/${torId}/visit`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('tor_token')}` }
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                alert(err.detail || "Couldn't remove that visit.");
+                return;
+            }
+            map.closePopup();
+            loadMapData();
         }
 
         async function fetchReviews(id) {
@@ -1168,10 +1253,15 @@
                 if (response.ok) {
                     const r = await response.json();
                     const bagged = r.tors_bagged_on_this_walk || [];
+                    const verified = r.tors_verified_on_this_walk || [];
                     const misses = r.near_misses || [];
                     const parts = [`<strong>Bagged ${r.total_bagged_count} new tor${r.total_bagged_count === 1 ? '' : 's'}</strong>`];
                     if (bagged.length) {
                         parts.push('<ul style="margin: 6px 0 0 18px; padding: 0;">' + bagged.map(n => `<li>⛰️ ${n}</li>`).join('') + '</ul>');
+                    }
+                    if (verified.length) {
+                        parts.push(`<div style="margin-top: 8px;"><strong>Verified ${verified.length} self-reported visit${verified.length === 1 ? '' : 's'}:</strong></div>`);
+                        parts.push('<ul style="margin: 4px 0 0 18px; padding: 0;">' + verified.map(n => `<li>✅ ${n}</li>`).join('') + '</ul>');
                     }
                     if (misses.length) {
                         parts.push(`<div style="margin-top: 8px;"><strong>Near misses (${r.total_near_miss_count}):</strong></div>`);
@@ -1399,7 +1489,7 @@
         async function loadLeaderboard() {
             const res = await fetch('/api/leaderboard');
             const data = await res.json();
-            document.getElementById('leaderboard-body').innerHTML = data.map(r => `<tr><td>${r.rank}</td><td>${r.username}</td><td>${r.total_bagged}</td></tr>`).join('');
+            document.getElementById('leaderboard-body').innerHTML = data.map(r => `<tr><td>${r.rank}</td><td>${r.username}</td><td>${r.verified_bagged}</td><td>${r.total_bagged}</td></tr>`).join('');
         }
 
         renderPlanList();

@@ -31,6 +31,12 @@ class Tor(Base):
     logs = relationship("Logbook", back_populates="tor")
 
 
+SOURCE_GPX = "gpx"
+SOURCE_GPS = "gps"
+SOURCE_MANUAL = "manual"
+LOG_SOURCES = (SOURCE_GPX, SOURCE_GPS, SOURCE_MANUAL)
+
+
 class Logbook(Base):
     __tablename__ = "logbook"
 
@@ -40,11 +46,21 @@ class Logbook(Base):
     bagged_at = Column(DateTime, default=datetime.datetime.utcnow)
     
     # How close did they get? (Useful for our near-miss logic later)
+    # Empty for self-reported visits — there's no position to measure from.
     distance_meters = Column(Float, nullable=True) 
+
+    # How the bag was recorded: "gpx" (uploaded track), "gps" (live bag from
+    # the phone) or "manual" (self-reported "I visited", no proof). Anything
+    # other than "manual" counts as verified.
+    source = Column(String(10), nullable=False, default="gpx", server_default="gpx")
 
     # Relationships back to the user and tor
     user = relationship("User", back_populates="logs")
     tor = relationship("Tor", back_populates="logs")
+
+    @property
+    def verified(self) -> bool:
+        return self.source != SOURCE_MANUAL
 
 class TorSuggestion(Base):
     __tablename__ = "tor_suggestions"

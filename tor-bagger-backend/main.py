@@ -6,7 +6,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, case, inspect, text
 import math
 import gpxpy
 import bcrypt
@@ -20,7 +20,7 @@ import json
 import gzip
 import requests as http_requests
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import models
 from database import engine, get_db
@@ -29,6 +29,18 @@ from database import engine, get_db
 load_dotenv()
 
 models.Base.metadata.create_all(bind=engine)
+
+# create_all only creates missing tables — it never adds columns to ones that
+# already exist. Columns added to existing tables are patched in here, once, on
+# startup. Every row that predates self-reported visits was verified (GPX or
+# live GPS; the two can't be told apart), so they backfill as "gpx".
+def _add_missing_columns():
+    logbook_columns = {c["name"] for c in inspect(engine).get_columns("logbook")}
+    if "source" not in logbook_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE logbook ADD COLUMN source VARCHAR(10) NOT NULL DEFAULT 'gpx'"))
+
+_add_missing_columns()
 
 app = FastAPI(title="Tor Bagger API", description="JWT-powered backend")
 
@@ -147,6 +159,11 @@ class BagRequest(BaseModel):
     user_lat: float
     user_lon: float
 
+class VisitRequest(BaseModel):
+    # The day of the visit; people mostly log walks after the fact. Omitted
+    # means today.
+    visited_on: date | None = None
+
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -261,18 +278,61 @@ def bag_a_tor(tor_id: int, request: BagRequest, current_user: models.User = Depe
         raise HTTPException(status_code=404, detail="Tor not found")
 
     existing_log = db.query(models.Logbook).filter_by(user_id=current_user.id, tor_id=tor_id).first()
-    if existing_log:
+    if existing_log and existing_log.verified:
          return {"message": f"You already bagged {tor.name} on {existing_log.bagged_at.date()}!"}
 
     distance = calculate_distance_meters(request.user_lat, request.user_lon, tor.lat, tor.lon)
     
     if distance <= bagging_radius:
-        new_log = models.Logbook(user_id=current_user.id, tor_id=tor.id, distance_meters=distance)
+        if existing_log:
+            # A self-reported visit, now proven: upgrade it in place.
+            existing_log.source = models.SOURCE_GPS
+            existing_log.distance_meters = distance
+            existing_log.bagged_at = datetime.utcnow()
+            db.commit()
+            return {"message": f"Verified! {current_user.username}'s visit to {tor.name} is now GPS-verified.", "distance_meters": round(distance, 1)}
+        new_log = models.Logbook(user_id=current_user.id, tor_id=tor.id, distance_meters=distance, source=models.SOURCE_GPS)
         db.add(new_log)
         db.commit()
         return {"message": f"Success! {current_user.username} just bagged {tor.name}!", "distance_meters": round(distance, 1)}
     else:
         raise HTTPException(status_code=400, detail=f"Too far away! {round(distance, 1)}m from {tor.name}.")
+
+@app.post("/tors/{tor_id}/visit")
+def record_visit(tor_id: int, request: VisitRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Self-reported bag: "I visited", no GPS or GPX proof."""
+    tor = db.query(models.Tor).filter(models.Tor.id == tor_id).first()
+    if not tor:
+        raise HTTPException(status_code=404, detail="Tor not found")
+
+    existing_log = db.query(models.Logbook).filter_by(user_id=current_user.id, tor_id=tor_id).first()
+    if existing_log:
+        return {"message": f"You already bagged {tor.name} on {existing_log.bagged_at.date()}!"}
+
+    visited_on = request.visited_on or date.today()
+    if visited_on > date.today():
+        raise HTTPException(status_code=400, detail="That date is in the future.")
+
+    db.add(models.Logbook(
+        user_id=current_user.id,
+        tor_id=tor.id,
+        bagged_at=datetime.combine(visited_on, datetime.min.time()),
+        source=models.SOURCE_MANUAL,
+    ))
+    db.commit()
+    return {"message": f"Logged your visit to {tor.name}. Upload a GPX track through it to verify."}
+
+@app.delete("/tors/{tor_id}/visit")
+def remove_visit(tor_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Undo a self-reported bag. Verified bags can't be removed this way."""
+    log = db.query(models.Logbook).filter_by(user_id=current_user.id, tor_id=tor_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="You haven't bagged that tor.")
+    if log.verified:
+        raise HTTPException(status_code=400, detail="Verified bags can't be removed.")
+    db.delete(log)
+    db.commit()
+    return {"message": "Visit removed."}
 
 # NOTICE: Also locked down with Depends(get_current_user)
 @app.post("/upload-gpx")
@@ -292,7 +352,10 @@ async def upload_gpx(file: UploadFile = File(...), current_user: models.User = D
 
     all_tors = db.query(models.Tor).all()
     already_bagged_logs = db.query(models.Logbook).filter_by(user_id=current_user.id).all()
-    already_bagged_ids = [log.tor_id for log in already_bagged_logs]
+    # Only verified bags are skipped: a track through a self-reported tor
+    # upgrades that visit rather than leaving it unproven.
+    already_bagged_ids = {log.tor_id for log in already_bagged_logs if log.verified}
+    self_reported = {log.tor_id: log for log in already_bagged_logs if not log.verified}
 
     bagging_radius = 150.0
     near_miss_radius = 500.0
@@ -311,6 +374,7 @@ async def upload_gpx(file: UploadFile = File(...), current_user: models.User = D
                         closest[tor.id] = {"distance": distance, "time": point.time}
 
     bagged_this_trip = []
+    verified_this_trip = []
     near_misses = []
 
     for tor_id, approach in closest.items():
@@ -322,24 +386,34 @@ async def upload_gpx(file: UploadFile = File(...), current_user: models.User = D
             point_time = point_time.replace(tzinfo=None)
 
         if min_dist <= bagging_radius:
-            new_log = models.Logbook(
-                user_id=current_user.id,
-                tor_id=tor.id,
-                distance_meters=min_dist,
-                bagged_at=point_time or datetime.utcnow(),
-            )
-            db.add(new_log)
-            bagged_this_trip.append(tor.name)
+            if tor.id in self_reported:
+                log = self_reported[tor.id]
+                log.source = models.SOURCE_GPX
+                log.distance_meters = min_dist
+                log.bagged_at = point_time or log.bagged_at
+                verified_this_trip.append(tor.name)
+            else:
+                new_log = models.Logbook(
+                    user_id=current_user.id,
+                    tor_id=tor.id,
+                    distance_meters=min_dist,
+                    bagged_at=point_time or datetime.utcnow(),
+                    source=models.SOURCE_GPX,
+                )
+                db.add(new_log)
+                bagged_this_trip.append(tor.name)
         elif min_dist <= near_miss_radius:
             near_misses.append(f"{tor.name} (Closest approach: {round(min_dist)}m)")
 
-    if bagged_this_trip:
+    if bagged_this_trip or verified_this_trip:
         db.commit()
 
     return {
         "message": f"GPX file processed for {current_user.username} successfully!",
         "tors_bagged_on_this_walk": bagged_this_trip,
         "total_bagged_count": len(bagged_this_trip),
+        "tors_verified_on_this_walk": verified_this_trip,
+        "total_verified_count": len(verified_this_trip),
         "near_misses": near_misses,
         "total_near_miss_count": len(near_misses)
     }
@@ -355,25 +429,35 @@ def get_my_bagged_tors(current_user: models.User = Depends(get_current_user), db
         stats_data.append({
             "tor_id": log.tor_id,
             "tor_name": log.tor.name,
-            "bagged_at": log.bagged_at.isoformat() if log.bagged_at else None
+            "bagged_at": log.bagged_at.isoformat() if log.bagged_at else None,
+            "source": log.source,
+            "verified": log.verified,
         })
 
     return {
         "count": len(logs),
+        "verified_count": sum(1 for log in logs if log.verified),
         "logs": stats_data
     }
 
 
 @app.get("/leaderboard")
 def get_leaderboard(db: Session = Depends(get_db)):
-    """Calculates the top 10 users with the most bagged Tors."""
+    """Top 10 users, ranked by verified bags. Anyone can tap "I visited", so
+    self-reported bags are shown alongside but don't decide the ranking."""
+    verified_count = func.sum(case((models.Logbook.source != models.SOURCE_MANUAL, 1), else_=0))
+    total_count = func.count(models.Logbook.id)
     leaderboard = db.query(
         models.User.username,
-        func.count(models.Logbook.id).label('total_bagged')
-    ).join(models.Logbook).group_by(models.User.id).order_by(func.count(models.Logbook.id).desc()).limit(10).all()
+        verified_count.label('verified_bagged'),
+        total_count.label('total_bagged')
+    ).join(models.Logbook).group_by(models.User.id).order_by(verified_count.desc(), total_count.desc()).limit(10).all()
 
     # Format the response into a nice list of dictionaries
-    return [{"rank": i + 1, "username": row[0], "total_bagged": row[1]} for i, row in enumerate(leaderboard)]
+    return [
+        {"rank": i + 1, "username": row[0], "verified_bagged": int(row[1] or 0), "total_bagged": row[2]}
+        for i, row in enumerate(leaderboard)
+    ]
 
 class ReviewCreate(BaseModel):
     rating: int = Field(..., ge=1, le=5) # Ensure 1-5 stars
@@ -611,7 +695,7 @@ def _verify_signature(payload: dict, signature: str) -> bool:
 def export_my_bagged_tors(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     logs = db.query(models.Logbook).filter_by(user_id=current_user.id).all()
     payload = {
-        "version": 1,
+        "version": 2,
         "user_id": current_user.id,
         "username": current_user.username,
         "exported_at": datetime.utcnow().isoformat(),
@@ -621,6 +705,7 @@ def export_my_bagged_tors(current_user: models.User = Depends(get_current_user),
                 "tor_name": log.tor.name,
                 "bagged_at": log.bagged_at.isoformat() if log.bagged_at else None,
                 "distance_meters": log.distance_meters,
+                "source": log.source,
             }
             for log in logs
         ],
@@ -653,6 +738,8 @@ async def import_my_bagged_tors(file: UploadFile = File(...), current_user: mode
 
     existing = db.query(models.Logbook).filter_by(user_id=current_user.id).all()
     existing_keys = {_key(log.tor_id, log.bagged_at) for log in existing}
+    # A user holds at most one bag per tor; an import must not add a second.
+    existing_by_tor = {log.tor_id: log for log in existing}
 
     imported = 0
     skipped = 0
@@ -672,12 +759,32 @@ async def import_my_bagged_tors(file: UploadFile = File(...), current_user: mode
         if not db.query(models.Tor).filter_by(id=tor_id).first():
             skipped += 1
             continue
-        db.add(models.Logbook(
+        # Version 1 exports predate self-reported visits, so every entry in
+        # them was verified. The signature covers "source", so a manual bag
+        # can't be edited into a verified one.
+        source = entry.get("source", models.SOURCE_GPX)
+        if source not in models.LOG_SOURCES:
+            skipped += 1
+            continue
+        current = existing_by_tor.get(tor_id)
+        if current:
+            # Only a verified entry over a self-reported one changes anything.
+            if current.verified or source == models.SOURCE_MANUAL:
+                skipped += 1
+                continue
+            current.source = source
+            current.bagged_at = bagged_at
+            current.distance_meters = entry.get("distance_meters")
+            imported += 1
+            continue
+        existing_by_tor[tor_id] = models.Logbook(
             user_id=current_user.id,
             tor_id=tor_id,
             bagged_at=bagged_at,
             distance_meters=entry.get("distance_meters"),
-        ))
+            source=source,
+        )
+        db.add(existing_by_tor[tor_id])
         imported += 1
     db.commit()
     return {"imported": imported, "skipped": skipped, "total_in_file": len(payload.get("logs", []))}
