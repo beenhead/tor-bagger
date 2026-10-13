@@ -55,14 +55,15 @@ class ApiClient {
     return list.map(Tor.fromJson).toList();
   }
 
-  Future<Set<int>> getBaggedTorIds() async {
+  /// The user's bags, keyed by tor id.
+  Future<Map<int, BaggedLog>> getBaggedLogs() async {
     final res = await http.get(_url('/my-bagged-tors'), headers: await _authHeaders());
     if (res.statusCode != 200) {
       throw ApiException('Failed to load bagged tors', statusCode: res.statusCode);
     }
     final body = jsonDecode(res.body) as Map<String, dynamic>;
-    final logs = (body['logs'] as List).cast<Map<String, dynamic>>();
-    return logs.map((l) => l['tor_id'] as int).toSet();
+    final logs = (body['logs'] as List).cast<Map<String, dynamic>>().map(BaggedLog.fromJson);
+    return {for (final log in logs) log.torId: log};
   }
 
   /// Returns the success message from the backend.
@@ -78,6 +79,30 @@ class ApiClient {
       throw ApiException(_extractDetail(res.body) ?? 'Bagging failed', statusCode: res.statusCode);
     }
     return (body as Map<String, dynamic>)['message'] as String? ?? 'Bagged!';
+  }
+
+  /// Self-reported bag ("I visited") — no location needed.
+  Future<String> recordVisit(int torId, DateTime visitedOn) async {
+    final day = '${visitedOn.year.toString().padLeft(4, '0')}-'
+        '${visitedOn.month.toString().padLeft(2, '0')}-'
+        '${visitedOn.day.toString().padLeft(2, '0')}';
+    final res = await http.post(
+      _url('/tors/$torId/visit'),
+      headers: await _authHeaders(json: true),
+      body: jsonEncode({'visited_on': day}),
+    );
+    if (res.statusCode != 200) {
+      throw ApiException(_extractDetail(res.body) ?? 'Could not record visit', statusCode: res.statusCode);
+    }
+    return (jsonDecode(res.body) as Map<String, dynamic>)['message'] as String? ?? 'Visit logged.';
+  }
+
+  /// Removes a self-reported bag. The backend refuses for verified ones.
+  Future<void> removeVisit(int torId) async {
+    final res = await http.delete(_url('/tors/$torId/visit'), headers: await _authHeaders());
+    if (res.statusCode != 200) {
+      throw ApiException(_extractDetail(res.body) ?? 'Could not remove visit', statusCode: res.statusCode);
+    }
   }
 
   String? _extractDetail(String body) {

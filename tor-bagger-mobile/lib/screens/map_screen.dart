@@ -22,7 +22,7 @@ class _MapScreenState extends State<MapScreen> {
   static const LatLng _dartmoorCentre = LatLng(50.5719, -3.9811);
 
   List<Tor> _tors = [];
-  Set<int> _baggedIds = {};
+  Map<int, BaggedLog> _logs = {};
   bool _loading = true;
   String? _error;
 
@@ -54,7 +54,8 @@ class _MapScreenState extends State<MapScreen> {
             const SizedBox(height: 12),
             const _HelpRow(
               icon: Icons.location_on,
-              text: 'Grey pins are un-bagged Tors. Green pins are ones you\'ve already bagged.',
+              text: 'Grey pins are un-bagged Tors. Solid green pins are verified bags; '
+                  'outlined green pins are self-reported visits.',
             ),
             const _HelpRow(
               icon: Icons.touch_app,
@@ -63,6 +64,12 @@ class _MapScreenState extends State<MapScreen> {
             const _HelpRow(
               icon: Icons.flag,
               text: '"Bag This Tor" uses your GPS to confirm you\'re within 150m of the summit.',
+            ),
+            const _HelpRow(
+              icon: Icons.edit_note,
+              text: '"I visited" logs a past visit without proof. It counts towards your total, '
+                  'but only verified bags rank on the leaderboard. Upload a GPX track or bag it '
+                  'on the summit to verify it.',
             ),
             const _HelpRow(
               icon: Icons.refresh,
@@ -89,16 +96,16 @@ class _MapScreenState extends State<MapScreen> {
     });
     try {
       final tors = await widget.api.getTors();
-      Set<int> bagged = {};
+      Map<int, BaggedLog> logs = {};
       try {
-        bagged = await widget.api.getBaggedTorIds();
+        logs = await widget.api.getBaggedLogs();
       } on ApiException {
         // Not fatal — viewing without an auth header still shows tors.
       }
       if (!mounted) return;
       setState(() {
         _tors = tors;
-        _baggedIds = bagged;
+        _logs = logs;
       });
     } catch (e) {
       if (!mounted) return;
@@ -151,8 +158,39 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  Future<void> _recordVisit(Tor tor) async {
+    final now = DateTime.now();
+    final day = await showDatePicker(
+      context: context,
+      helpText: 'When did you visit ${tor.name}?',
+      initialDate: now,
+      firstDate: DateTime(1950),
+      lastDate: now,
+    );
+    if (day == null || !mounted) return;
+    Navigator.of(context).pop(); // close the sheet
+    try {
+      _snack(await widget.api.recordVisit(tor.id, day));
+      await _refresh();
+    } on ApiException catch (e) {
+      _snack(e.message);
+    }
+  }
+
+  Future<void> _removeVisit(Tor tor) async {
+    Navigator.of(context).pop(); // close the sheet
+    try {
+      await widget.api.removeVisit(tor.id);
+      _snack('Removed your visit to ${tor.name}.');
+      await _refresh();
+    } on ApiException catch (e) {
+      _snack(e.message);
+    }
+  }
+
   void _openTorSheet(Tor tor) {
-    final isBagged = _baggedIds.contains(tor.id);
+    final log = _logs[tor.id];
+    final verified = log?.verified ?? false;
     showModalBottomSheet(
       context: context,
       builder: (context) => Padding(
@@ -168,15 +206,43 @@ class _MapScreenState extends State<MapScreen> {
               '${tor.reviewCount > 0 ? "  •  ${tor.avgRating.toStringAsFixed(1)}★ (${tor.reviewCount})" : ""}',
               style: Theme.of(context).textTheme.bodyMedium,
             ),
+            if (log != null) ...[
+              const SizedBox(height: 12),
+              _BagStatus(log: log),
+            ],
             const SizedBox(height: 20),
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                onPressed: isBagged ? null : () => _bag(tor),
-                icon: Icon(isBagged ? Icons.check_circle : Icons.flag),
-                label: Text(isBagged ? 'Already Bagged' : 'Bag This Tor'),
+                onPressed: verified ? null : () => _bag(tor),
+                icon: Icon(verified ? Icons.check_circle : Icons.flag),
+                label: Text(verified
+                    ? 'Already Bagged'
+                    : log != null
+                        ? 'Verify With GPS'
+                        : 'Bag This Tor'),
               ),
             ),
+            if (log == null) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () => _recordVisit(tor),
+                  icon: const Icon(Icons.edit_note),
+                  label: const Text('I Visited'),
+                ),
+              ),
+            ] else if (!verified) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton(
+                  onPressed: () => _removeVisit(tor),
+                  child: const Text('Remove Visit'),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
           ],
         ),
@@ -211,7 +277,7 @@ class _MapScreenState extends State<MapScreen> {
               ),
               MarkerLayer(
                 markers: _tors.map((tor) {
-                  final bagged = _baggedIds.contains(tor.id);
+                  final log = _logs[tor.id];
                   return Marker(
                     point: LatLng(tor.lat, tor.lon),
                     width: 32,
@@ -219,9 +285,9 @@ class _MapScreenState extends State<MapScreen> {
                     child: GestureDetector(
                       onTap: () => _openTorSheet(tor),
                       child: Icon(
-                        Icons.location_on,
+                        log != null && !log.verified ? Icons.location_on_outlined : Icons.location_on,
                         size: 32,
-                        color: bagged ? Colors.green.shade700 : Colors.blueGrey,
+                        color: log != null ? Colors.green.shade700 : Colors.blueGrey,
                       ),
                     ),
                   );
@@ -259,12 +325,38 @@ class _MapScreenState extends State<MapScreen> {
             child: Card(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Text('${_baggedIds.length} / ${_tors.length} bagged'),
+                child: Text('${_logs.length} / ${_tors.length} bagged'
+                    ' (${_logs.values.where((l) => l.verified).length} verified)'),
               ),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _BagStatus extends StatelessWidget {
+  final BaggedLog log;
+  const _BagStatus({required this.log});
+
+  @override
+  Widget build(BuildContext context) {
+    final date = log.baggedAt == null
+        ? ''
+        : ' on ${log.baggedAt!.day}/${log.baggedAt!.month}/${log.baggedAt!.year}';
+    final label = switch (log.source) {
+      'gps' => 'GPS verified$date',
+      'manual' => 'Self-reported$date — upload a GPX track or bag it on the summit to verify',
+      _ => 'GPX verified$date',
+    };
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(log.verified ? Icons.verified : Icons.edit_note, size: 18, color: Colors.green.shade700),
+        const SizedBox(width: 8),
+        Expanded(child: Text(label, style: Theme.of(context).textTheme.bodyMedium)),
+      ],
     );
   }
 }

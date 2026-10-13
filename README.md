@@ -6,12 +6,13 @@ This project allows hikers to track their progress across the moor. It features 
 
 ## ✨ Features
 
-*   **Interactive Web Map:** A Leaflet.js powered frontend visualizing all Dartmoor Tors. Pins are color-coded by user-specific bagged / un-bagged state.
+*   **Interactive Web Map:** A Leaflet.js powered frontend visualizing all Dartmoor Tors. Pins are color-coded per user: solid green for verified bags, a hollow green ring for self-reported ones, grey for un-bagged.
+*   **Verified vs Self-Reported Bags:** A bag is *verified* when it comes from a GPX track or a live GPS check on the summit. Anyone can also tap **I visited** on a tor to log a past visit, with a date, as *self-reported*. Self-reported bags count towards your total and can be removed; uploading a track through the tor (or bagging it live) upgrades one to verified in place. The leaderboard ranks by verified bags only and shows the total alongside.
 *   **GPX Route Processing:** Upload a `.gpx` file from Strava, Garmin, or OS Maps. The engine scans the route, automatically bags any Tors you passed within 150 meters of, and dates each bag from the GPX point's own timestamp. `gpx-help.html`, linked from the upload box, walks users through exporting one from Strava.
 *   **Strava Bulk Import:** Feed in the whole-history `.zip` Strava emails you. The archive is opened *in the browser* — its activity list is read to find the walks, hikes and runs, and only those tracks are uploaded, one at a time, with a progress bar. Rides, photos and videos are never sent anywhere.
 *   **Route Planner:** Pick a set of Tors and plot a walking route between them. Works out the shortest visiting order, follows real paths via [BRouter](https://brouter.de), and reports distance, ascent and a Naismith time estimate. Routes save to your account and export as GPX for your watch — which then comes back in as a recorded track to bag what you walked.
 *   **Near Miss Detection:** Agonizingly close? The app detects if you walked within 500 meters of a Tor but missed the summit, logging it as a "Near Miss."
-*   **Mobile App (lean v1):** Flutter app for iOS and Android — login, live map, GPS-based live bagging.
+*   **Mobile App (lean v1):** Flutter app for iOS and Android — login, live map, GPS-based live bagging, and self-reported "I visited" logging.
 *   **Secure Authentication:** Full user registration and login system protected by bcrypt password hashing and JWT (JSON Web Tokens).
 *   **Relational Database:** MySQL + SQLAlchemy for robust, multi-user data storage.
 *   **Source Scraper:** Pulls master tor data (name, coordinates, elevation, description) from `dartmoorwalker.co.uk`. Populates an admin approval queue for new entries and backfills missing data on existing ones in-place. Re-runnable / idempotent.
