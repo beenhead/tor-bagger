@@ -6,7 +6,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import func, case, inspect, text
+from sqlalchemy import func, case, inspect, text, and_, or_
 import math
 import gpxpy
 import bcrypt
@@ -39,6 +39,26 @@ def _add_missing_columns():
     if "source" not in logbook_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE logbook ADD COLUMN source VARCHAR(10) NOT NULL DEFAULT 'gpx'"))
+
+    # Reviews predating moderation were already public, so they backfill as
+    # approved; new rows get "pending" from the model.
+    review_columns = {c["name"] for c in inspect(engine).get_columns("tor_reviews")}
+    if "status" not in review_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE tor_reviews ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'approved'"))
+            conn.execute(text("ALTER TABLE tor_reviews ALTER COLUMN status SET DEFAULT 'pending'"))
+            # The old endpoint let a user review the same tor many times. Keep
+            # their newest review public and hide the rest (not deleted).
+            conn.execute(text("""
+                UPDATE tor_reviews SET status = 'rejected'
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY user_id, tor_id ORDER BY created_at DESC, id DESC
+                        ) AS rn FROM tor_reviews
+                    ) ranked WHERE rn > 1
+                )
+            """))
 
 _add_missing_columns()
 
@@ -245,12 +265,16 @@ def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestFor
 
 @app.get("/tors")
 def get_all_tors(db: Session = Depends(get_db)):
-    # This query fetches all Tors and calculates their average rating from the reviews table
+    # This query fetches all Tors and calculates their average rating from the
+    # approved reviews; pending and rejected ones don't count.
     tors = db.query(
         models.Tor,
         func.avg(models.TorReview.rating).label('avg_rating'),
         func.count(models.TorReview.id).label('review_count')
-    ).outerjoin(models.TorReview).group_by(models.Tor.id).all()
+    ).outerjoin(models.TorReview, and_(
+        models.TorReview.tor_id == models.Tor.id,
+        models.TorReview.status == "approved",
+    )).group_by(models.Tor.id).all()
 
     results = []
     for tor, avg_rating, review_count in tors:
@@ -461,28 +485,139 @@ def get_leaderboard(db: Session = Depends(get_db)):
 
 class ReviewCreate(BaseModel):
     rating: int = Field(..., ge=1, le=5) # Ensure 1-5 stars
-    comment: str = Field(..., max_length=500)
+    comment: str = Field("", max_length=500)
+
+def _user_reviews(db: Session, user_id: int, tor_id: int):
+    return (db.query(models.TorReview)
+            .filter_by(user_id=user_id, tor_id=tor_id)
+            .order_by(models.TorReview.created_at.desc(), models.TorReview.id.desc())
+            .all())
 
 @app.post("/tors/{tor_id}/reviews")
 def add_review(tor_id: int, review: ReviewCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Optional: Check if they have actually bagged the tor before letting them review it!
+    """One review per user per tor: posting again replaces the earlier one.
+    New and edited reviews wait for an admin before they're public."""
+    tor = db.query(models.Tor).filter(models.Tor.id == tor_id).first()
+    if not tor:
+        raise HTTPException(status_code=404, detail="Tor not found")
+
     has_bagged = db.query(models.Logbook).filter_by(user_id=current_user.id, tor_id=tor_id).first()
     if not has_bagged:
         raise HTTPException(status_code=403, detail="You must bag this Tor before you can review it!")
 
-    new_review = models.TorReview(
-        tor_id=tor_id,
-        user_id=current_user.id,
-        rating=review.rating,
-        comment=review.comment
-    )
-    db.add(new_review)
+    # Before this endpoint upserted, the same user could post many reviews of a
+    # tor. Keep the newest, drop the rest, so the average counts them once.
+    existing = _user_reviews(db, current_user.id, tor_id)
+    for extra in existing[1:]:
+        db.delete(extra)
+
+    if existing:
+        existing[0].rating = review.rating
+        existing[0].comment = review.comment.strip()
+        existing[0].status = "pending"
+        existing[0].created_at = datetime.utcnow()
+    else:
+        db.add(models.TorReview(
+            tor_id=tor_id,
+            user_id=current_user.id,
+            rating=review.rating,
+            comment=review.comment.strip(),
+            status="pending"
+        ))
     db.commit()
-    return {"message": "Review added!"}
+    return {"message": "Thanks! Your review will appear once an admin approves it."}
+
+@app.delete("/tors/{tor_id}/reviews")
+def delete_review(tor_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    existing = _user_reviews(db, current_user.id, tor_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="You haven't reviewed that tor.")
+    for r in existing:
+        db.delete(r)
+    db.commit()
+    return {"message": "Review deleted."}
+
+# Reviews are public, but a signed-in viewer is told which one is theirs so the
+# page can offer to edit it. A missing or bad token just means "anonymous".
+optional_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+
+def get_optional_user(token: str | None = Depends(optional_oauth2_scheme), db: Session = Depends(get_db)):
+    if not token:
+        return None
+    try:
+        return get_current_user(token, db)
+    except HTTPException:
+        return None
 
 @app.get("/tors/{tor_id}/reviews")
-def get_reviews(tor_id: int, db: Session = Depends(get_db)):
-    return db.query(models.TorReview).filter_by(tor_id=tor_id).all()
+def get_reviews(tor_id: int, current_user: models.User | None = Depends(get_optional_user), db: Session = Depends(get_db)):
+    reviews = (db.query(models.TorReview, models.User.username)
+               .join(models.User, models.TorReview.user_id == models.User.id)
+               .filter(models.TorReview.tor_id == tor_id)
+               .filter(or_(
+                   models.TorReview.status == "approved",
+                   # Authors can see their own review while it's in the queue.
+                   models.TorReview.user_id == (current_user.id if current_user else None),
+               ))
+               .order_by(models.TorReview.created_at.desc(), models.TorReview.id.desc())
+               .all())
+    results, seen_users = [], set()
+    for review, username in reviews:
+        # Legacy duplicates: only the newest review per user is shown.
+        if review.user_id in seen_users:
+            continue
+        seen_users.add(review.user_id)
+        results.append({
+            "id": review.id,
+            "username": username,
+            "rating": review.rating,
+            "comment": review.comment or "",
+            "created_at": review.created_at.isoformat() if review.created_at else None,
+            "status": review.status,
+            "is_mine": current_user is not None and review.user_id == current_user.id,
+        })
+    return results
+
+@app.get("/admin/reviews")
+def get_pending_reviews(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    reviews = (db.query(models.TorReview, models.User.username, models.Tor.name)
+               .join(models.User, models.TorReview.user_id == models.User.id)
+               .join(models.Tor, models.TorReview.tor_id == models.Tor.id)
+               .filter(models.TorReview.status == "pending")
+               .order_by(models.TorReview.created_at)
+               .all())
+    return [
+        {
+            "id": review.id,
+            "tor_id": review.tor_id,
+            "tor_name": tor_name,
+            "username": username,
+            "rating": review.rating,
+            "comment": review.comment or "",
+            "created_at": review.created_at.isoformat() if review.created_at else None,
+        }
+        for review, username, tor_name in reviews
+    ]
+
+def _moderate_review(review_id: int, new_status: str, current_user: models.User, db: Session):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    review = db.query(models.TorReview).filter_by(id=review_id).first()
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+    review.status = new_status
+    db.commit()
+    return {"message": f"Review {new_status}."}
+
+@app.post("/admin/reviews/{review_id}/approve")
+def approve_review(review_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _moderate_review(review_id, "approved", current_user, db)
+
+@app.post("/admin/reviews/{review_id}/reject")
+def reject_review(review_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _moderate_review(review_id, "rejected", current_user, db)
 
 @app.get("/admin/suggestions")
 def get_suggestions(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):

@@ -86,6 +86,8 @@ class TorReview(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     rating = Column(Integer) # 1 to 5 stars
     comment = Column(String(500))
+    # pending -> approved | rejected. Only approved reviews are public.
+    status = Column(String(20), nullable=False, default="pending")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     # Relationships
