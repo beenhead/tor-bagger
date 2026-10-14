@@ -82,7 +82,7 @@
         <div style="font-size: 0.75rem; color: #777; margin: 0 0 14px;">
             <span class="legend-dot" style="background: #27ae60; margin-left: 0;"></span>Verified
             <span class="legend-dot" style="background: white; border: 2px solid #27ae60;"></span>Self-reported
-            <span class="legend-dot" style="background: #7f8c8d;"></span>Not bagged
+            <span class="legend-dot" style="background: #1f4e79;"></span>Not bagged
         </div>
         <button id="main-logout-btn" class="btn-logout hidden" onclick="handleLogout()">Logout</button>
         <div id="nav-menu" class="nav-tabs hidden">
@@ -1044,7 +1044,7 @@
                 const log = logsByTorId.get(tor.id);
                 const isBagged = !!log;
                 const marker = L.circleMarker([tor.lat, tor.lon], !isBagged
-                    ? { radius: 7, fillColor: "#7f8c8d", color: "#fff", weight: 2, fillOpacity: 0.9 }
+                    ? { radius: 7, fillColor: "#1f4e79", color: "#fff", weight: 2, fillOpacity: 0.9 }
                     : log.verified
                         ? { radius: 9, fillColor: "#27ae60", color: "#fff", weight: 2, fillOpacity: 0.9 }
                         : { radius: 8, fillColor: "#fff", color: "#27ae60", weight: 3, fillOpacity: 0.9 });

@@ -287,7 +287,7 @@ class _MapScreenState extends State<MapScreen> {
                       child: Icon(
                         log != null && !log.verified ? Icons.location_on_outlined : Icons.location_on,
                         size: 32,
-                        color: log != null ? Colors.green.shade700 : Colors.blueGrey,
+                        color: log != null ? Colors.green.shade700 : const Color(0xFF1F4E79),
                       ),
                     ),
                   );
